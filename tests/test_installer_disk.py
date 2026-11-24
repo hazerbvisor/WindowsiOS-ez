@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -31,7 +32,8 @@ class InstallerDiskTests(unittest.TestCase):
         work = Path(directory.name)
         (work / "fatfs").symlink_to(Path(FATFS).resolve(), target_is_directory=True)
         (work / "udfread").mkdir()
-        (work / "udfread" / "udfread.h").symlink_to(Path(UDF_HEADER).resolve())
+        for name in ("udfread.h", "blockinput.h"):
+            (work / "udfread" / name).symlink_to(Path(UDF_HEADER).resolve().with_name(name))
         runner = work / "main.c"
         runner.write_text(r"""
 #include <stdio.h>
@@ -61,7 +63,7 @@ int main(int argc, char **argv) {
         cls.binary = work / "installer"
         subprocess.run([
             os.environ.get("CC", "cc"), "-D_GNU_SOURCE", "-D_DEFAULT_SOURCE", "-D_DARWIN_C_SOURCE", "-std=c11", "-O2",
-            "-I", work, "-I", ROOT / "host", runner, ROOT / "host" / "installer_disk.c",
+            "-I", work, "-I", ROOT / "host", runner, ROOT / "host" / "installer_disk.c", ROOT / "host" / "disc_image.c",
             Path(FATFS) / "ff.c", Path(FATFS) / "ffunicode.c", UDF_LIBRARY, "-pthread", "-o", cls.binary,
         ], check=True)
 
@@ -84,14 +86,14 @@ int main(int argc, char **argv) {
         for name, data in self.files.items():
             (self.source / name).write_bytes(data)
 
-    def make_iso(self):
-        subprocess.run([GENISOIMAGE, "-quiet", "-udf", "-o", self.iso, self.source], check=True)
+    def make_iso(self, *options):
+        subprocess.run([GENISOIMAGE, "-quiet", *options, "-o", self.iso, self.source], check=True)
 
     def build(self, *options):
         return subprocess.run([self.binary, self.iso, self.output, *options], capture_output=True)
 
     def test_layout_and_files_are_readable(self):
-        self.make_iso()
+        self.make_iso("-udf")
         process = self.build()
         self.assertEqual(process.returncode, 0, process.stderr.decode())
         copied = sum(map(len, self.files.values()))
@@ -138,8 +140,63 @@ int main(int argc, char **argv) {
             result = subprocess.run([FSCK_EXFAT, "-n", exfat], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_cancel_and_invalid_media_do_not_publish(self):
+    def test_iso9660_multi_extent_payload_is_copied_in_order(self):
+        self.files["Sources/Install.WIM"] = b"A" * 2048 + b"B" * 619
+        (self.source / "Sources/Install.WIM").write_bytes(self.files["Sources/Install.WIM"])
         self.make_iso()
+        image = bytearray(self.iso.read_bytes())
+        sector = 2048
+
+        def entry(directory, name):
+            cursor = directory * sector
+            while image[cursor]:
+                length, name_length = image[cursor], image[cursor + 32]
+                if image[cursor + 33:cursor + 33 + name_length] == name:
+                    return cursor
+                cursor += length
+            self.fail(f"missing test fixture entry {name!r}")
+
+        def extent(record):
+            return struct.unpack_from("<I", image, record + 2)[0]
+
+        root = extent(16 * sector + 156)
+        sources = extent(entry(root, b"SOURCES"))
+        record = entry(sources, b"INSTALL.WIM;1")
+        length = image[record]
+        tail = record + length
+        end = (sources + 1) * sector
+        self.assertEqual(image[end - length:end], bytes(length))
+        second = bytearray(image[record:tail])
+        struct.pack_into("<I", second, 2, extent(record) + 1)
+        struct.pack_into(">I", second, 6, extent(record) + 1)
+        struct.pack_into("<I", second, 10, 619)
+        struct.pack_into(">I", second, 14, 619)
+        image[tail + length:end] = image[tail:end - length]
+        image[tail:tail + length] = second
+        image[record + 25] |= 0x80
+        struct.pack_into("<I", image, record + 10, sector)
+        struct.pack_into(">I", image, record + 14, sector)
+        self.iso.write_bytes(image)
+
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        with self.output.open("rb") as disk:
+            disk.seek(512 * 2 + 160)
+            start, end = struct.unpack("<QQ", disk.read(16))
+            disk.seek(start * 512)
+            partition = disk.read((end - start + 1) * 512)
+        self.assertIn(self.files["Sources/Install.WIM"], partition)
+
+        self.output.unlink()
+        image[tail + 33] = ord("X")
+        self.iso.write_bytes(image)
+        result = self.build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"malformed directory", result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_cancel_and_invalid_media_do_not_publish(self):
+        self.make_iso("-udf")
         original = self.iso.stat().st_size
         result = self.build("cancel")
         self.assertNotEqual(result.returncode, 0)
@@ -148,12 +205,12 @@ int main(int argc, char **argv) {
         self.assertEqual(list(self.work.glob("*.building.*")), [])
         self.assertEqual(self.iso.stat().st_size, original)
         (self.source / "Boot/BCD").unlink()
-        self.make_iso()
+        self.make_iso("-udf")
         self.assertNotEqual(self.build().returncode, 0)
         self.assertFalse(self.output.exists())
 
     def test_existing_installer_remains_untouched(self):
-        self.make_iso()
+        self.make_iso("-udf")
         self.output.write_bytes(b"existing")
         self.assertNotEqual(self.build().returncode, 0)
         self.assertEqual(self.output.read_bytes(), b"existing")
@@ -168,7 +225,7 @@ int main(int argc, char **argv) {
         loader[64:] = b"PE\0\0\x64\xaa"
         (boot / "bootmgfw.efi").write_bytes(loader)
         (boot / "BCD").write_bytes(b"test boot configuration")
-        self.make_iso()
+        self.make_iso("-udf")
         self.assertEqual(self.build().returncode, 0)
         before = self.output.stat().st_mtime_ns
         subprocess.run([self.binary, self.output, self.iso, "check"], check=True)
@@ -207,7 +264,7 @@ EFI_STATUS efi_main(void *image, void *system_table) {
             os.environ["EFI_LLD"], "-flavor", "link", "/machine:arm64", "/subsystem:efi_application",
             "/entry:efi_main", "/nodefaultlib", f"/out:{efi}", object_file,
         ], check=True)
-        self.make_iso()
+        self.make_iso("-udf")
         self.assertEqual(self.build().returncode, 0)
         rom_path = os.environ.get("QEMU_DATA_DIR")
         qemu = [os.environ["QEMU_AARCH64"]]
@@ -239,6 +296,53 @@ EFI_STATUS efi_main(void *image, void *system_table) {
                 names.append(directory[offset + 2:offset + 32].decode("utf-16-le").rstrip("\x00"))
         return names
 
+    def compile_winpe_preparer(self):
+        runner = self.work / "prepare.c"
+        runner.write_text(r"""
+#include <stdio.h>
+#include "installer_winpe.h"
+
+int main(int argc, char **argv) {
+    char error[256] = {0};
+    int result = winios_prepare_winpe_wim(argv[1], argv[2], NULL, NULL, error, sizeof(error));
+    if (!result && argc == 7)
+        result = winios_build_installer_disk(argv[1], argv[4], argv[3], argv[5], argv[6], NULL, NULL, error, sizeof(error));
+    if (result) fprintf(stderr, "%s\n", error);
+    return result != 0;
+}
+""")
+        include = self.binary.parent
+        binary = self.work / "prepare"
+        subprocess.run([
+            os.environ.get("CC", "cc"), "-D_DEFAULT_SOURCE", "-D_DARWIN_C_SOURCE", "-D_GNU_SOURCE",
+            "-std=c11", "-O2", "-I", include,
+            "-I", Path(os.environ["WIMLIB_HEADER"]).parent, "-I", ROOT / "host", runner,
+            ROOT / "host" / "installer_winpe.c", ROOT / "host" / "installer_disk.c", ROOT / "host" / "disc_image.c",
+            Path(FATFS) / "ff.c", Path(FATFS) / "ffunicode.c", UDF_LIBRARY, os.environ["WIMLIB_LIBRARY"],
+            "-pthread", "-o", binary,
+        ], check=True)
+        return binary
+
+    @unittest.skipUnless(all(os.environ.get(name) for name in
+                             ("WINDOWS_24H2_ARM64_ISO", "WIMLIB_HEADER", "WIMLIB_LIBRARY", "WIMLIB_IMAGEX")),
+                         "a genuine ARM64 24H2 ISO and host wimlib are required")
+    def test_genuine_windows_iso_winpe_preparation(self):
+        binary = self.compile_winpe_preparer()
+        staging = self.work / "winpe"
+        staging.mkdir()
+        result = subprocess.run([binary, os.environ["WINDOWS_24H2_ARM64_ISO"], staging], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        patched = staging / "boot.wim"
+        imagex = os.environ["WIMLIB_IMAGEX"]
+        info = subprocess.check_output([imagex, "info", patched], text=True)
+        self.assertRegex(info, r"Architecture:\s+ARM64")
+        self.assertRegex(info, r"Build:\s+26100")
+        boot = re.search(r"Boot Index:\s+(\d+)", info)
+        self.assertIsNotNone(boot, info)
+        subprocess.run([imagex, "extract", patched, boot[1], "/Windows/System32/winios-setup.cmd",
+                        f"--dest-dir={staging}"], stdout=subprocess.DEVNULL, check=True)
+        self.assertIn("/InstallFrom", (staging / "winios-setup.cmd").read_text())
+
     @unittest.skipUnless(os.environ.get("WIMLIB_HEADER") and os.environ.get("WIMLIB_LIBRARY")
                          and os.environ.get("WIMLIB_IMAGEX"), "host wimlib is unavailable")
     def test_winpe_patch_and_final_disk_with_real_wim_container(self):
@@ -252,38 +356,15 @@ EFI_STATUS efi_main(void *image, void *system_table) {
         subprocess.run([imagex, "capture", wim_source, wim_path, "Windows Setup", "--boot"],
                        stdout=subprocess.DEVNULL, check=True)
         before = wim_path.read_bytes()
-        self.make_iso()
+        self.make_iso("-J")
 
-        runner = self.work / "prepare.c"
-        runner.write_text(r"""
-#include <stdio.h>
-#include "installer_winpe.h"
-
-int main(int argc, char **argv) {
-    char error[256] = {0};
-    int result = winios_prepare_winpe_wim(argv[1], argv[2], NULL, NULL, error, sizeof(error));
-    if (!result)
-        result = winios_build_installer_disk(argv[1], argv[4], argv[3], argv[5], argv[6], NULL, NULL, error, sizeof(error));
-    if (result) fprintf(stderr, "%s\n", error);
-    return result != 0;
-}
-""")
-        include = self.binary.parent
-        binary = self.work / "prepare"
-        subprocess.run([
-            os.environ.get("CC", "cc"), "-D_DEFAULT_SOURCE", "-D_DARWIN_C_SOURCE", "-D_GNU_SOURCE",
-            "-std=c11", "-O2", "-I", include,
-            "-I", Path(os.environ["WIMLIB_HEADER"]).parent, "-I", ROOT / "host", runner,
-            ROOT / "host" / "installer_winpe.c", ROOT / "host" / "installer_disk.c",
-            Path(FATFS) / "ff.c", Path(FATFS) / "ffunicode.c", UDF_LIBRARY, os.environ["WIMLIB_LIBRARY"],
-            "-pthread", "-o", binary,
-        ], check=True)
+        binary = self.compile_winpe_preparer()
         staging = self.work / "staging"
         staging.mkdir()
         patched = staging / "boot.wim"
         drivers = self.work / "drivers"
         drivers.mkdir()
-        for name in ("netkvm.inf", "netkvm.cat", "netkvm.sys"):
+        for name in ("netkvm.inf", "netkvm.cat", "netkvm.sys", "netkvmco.dll"):
             (drivers / name).write_bytes(("test content for " + name).encode())
         answer = self.work / "answer.xml"
         answer.write_bytes(b"<unattend>test</unattend>")

@@ -176,12 +176,16 @@ enum VMFoundationTests {
             let invalid = try media.list()
             precondition(invalid.isEmpty && FileManager.default.fileExists(atPath: source.path))
             let first = try media.store(source: source, name: "24H2", linking: true, id: id, checksum: nil) { _ in
-                [WindowsImage(name: "Pro", index: 1, architecture: 12, build: 26100)]
+                WindowsISOInspection(images: [WindowsImage(name: "Pro", index: 1, architecture: 12, build: 26100)],
+                                     computedSHA256: String(repeating: "a", count: 64),
+                                     filesystem: "UDF", diagnostics: "Selected UDF.")
             }
             let retry = try media.store(source: source, name: "24H2", linking: true, id: id, checksum: nil) { _ in
                 preconditionFailure("recovering an already published image should reuse it")
             }
             precondition(first == retry)
+            precondition(first.sha256 == nil && first.savedChecksum == String(repeating: "a", count: 64))
+            precondition(first.filesystem == "UDF")
             try media.remove(first)
             let removed = try media.list()
             precondition(removed.isEmpty && FileManager.default.fileExists(atPath: source.path))

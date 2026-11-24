@@ -33,7 +33,7 @@ cache_ready() {
     [ -f "$OUT_DEPS/build-key" ] && [ "$(cat "$OUT_DEPS/build-key")" = "$KEY" ] || return 1
     [ -s "$OUT_DEPS/include/slirp/libslirp.h" ] &&
         [ -s "$OUT_DEPS/include/slirp/libslirp-version.h" ] &&
-        [ -s "$OUT_DEPS/include/udfread/udfread.h" ] &&
+        [ -s "$OUT_DEPS/include/udfread/udfread.h" ] && [ -s "$OUT_DEPS/include/udfread/blockinput.h" ] &&
         [ -s "$OUT_DEPS/include/wimlib.h" ] && [ -s "$OUT_DEPS/include/fatfs/ff.h" ] &&
         [ -s "$OUT_DEPS/include/libtpms/tpm_library.h" ] || return 1
     for lib in "${LIBS[@]}"; do
@@ -76,7 +76,10 @@ unset PKG_CONFIG_PATH
 FFI_URL="https://github.com/libffi/libffi/releases/download/v3.5.0/libffi-3.5.0.tar.gz"
 GLIB_URL="https://download.gnome.org/sources/glib/2.83/glib-2.83.0.tar.xz"
 SLIRP_URL="https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
-UDF_URL="https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz"
+# 1.2.0 assumes physical partition zero. This upstream revision reads the first
+# partition and validates it against the logical map (Microsoft uses 2989).
+UDF_REV="b0bc6957e7e07d5f35391f210596d9eb71cffdd9"
+UDF_URL="https://code.videolan.org/videolan/libudfread/-/archive/$UDF_REV/libudfread-$UDF_REV.tar.gz"
 WIM_URL="https://wimlib.net/downloads/wimlib-1.14.5.tar.gz"
 OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz"
 TPMS_URL="https://deb.debian.org/debian/pool/main/libt/libtpms/libtpms_0.10.2.orig.tar.gz"
@@ -102,7 +105,7 @@ fetch_unpack() {
 fetch_unpack "$FFI_URL" 8c72678628a5dd8782f08ad421d5a441e42c1c5c1b33e0bc211cbfcf1f3b3978
 fetch_unpack "$GLIB_URL" a07d9e1a57a4279c5ece71c26dc44eea12bd518ea9ff695d53e722997032b614
 fetch_unpack "$SLIRP_URL" 3970542143b7c11e6a09a4d2b50f30a133473c41f15ed0bdcc3b7a1c450d9a5c
-fetch_unpack "$UDF_URL" bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f
+fetch_unpack "$UDF_URL" c04bb96b72dd0760030d880ad6c9ea2ae80abbdd648de127adb1b2e8555186aa
 fetch_unpack "$WIM_URL" 84221a3abd5b91228f15f8e6065c335a336237b5738197b75bf419eea561a194
 fetch_unpack "$OPENSSL_URL" 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 fetch_unpack "$TPMS_URL" edac03680f8a4a1c5c1d609a10e3f41e1a129e38ff5158f0c8deaedc719fb127
@@ -199,12 +202,12 @@ fi
 
 # 4. libudfread (read-only Windows ISO filesystem inspection)
 if [ ! -f "$STAMPS/libudfread" ]; then
-    echo "[build] libudfread-1.2.0"
-    rm -rf "$SRC/libudfread-1.2.0/_ios_build"
-    ( cd "$SRC/libudfread-1.2.0" \
+    echo "[build] libudfread ($UDF_REV)"
+    rm -rf "$SRC/libudfread-$UDF_REV/_ios_build"
+    ( cd "$SRC/libudfread-$UDF_REV" \
       && meson setup _ios_build --cross-file "$CROSS_IOS" --prefix="$PREFIX" \
             --buildtype=release --default-library=static \
-      && meson compile -C _ios_build -j "$NCPU" \
+      && meson compile -C _ios_build -j "$NCPU" udfread \
       && meson install -C _ios_build --no-rebuild ) > "$WORK_DEPS/libudfread.log" 2>&1 || show_failure "$WORK_DEPS/libudfread.log"
     touch "$STAMPS/libudfread"
 fi

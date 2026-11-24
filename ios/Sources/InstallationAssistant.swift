@@ -351,7 +351,8 @@ struct InstallationAssistant: View {
             error = "Wait for the current media operation to finish."
             return
         }
-        guard let media = draft.mediaID, hasSelectedMedia, hasCode, hasVars else {
+        guard let media = draft.mediaID, let source = shelf.items.first(where: { $0.id == media }),
+              hasCode, hasVars else {
             error = "Select a verified Windows ISO and both firmware files before preparing this machine."
             if draft.stage == .preparing { draft.stage = .review }
             return
@@ -377,7 +378,8 @@ struct InstallationAssistant: View {
                     let input = preparing
                     let progress = $installerProgress
                     let work = Task.detached(priority: .userInitiated) {
-                        try InstallerPreparation.build(iso: iso, output: stageDisk, drivers: drivers, edition: input.editionIndex) { status in
+                        try InstallerPreparation.build(iso: iso, output: stageDisk, expectedSHA256: source.savedChecksum,
+                                                       drivers: drivers, edition: input.editionIndex) { status in
                             Task { @MainActor in progress.wrappedValue = status }
                         }
                         try Task.checkCancellation()

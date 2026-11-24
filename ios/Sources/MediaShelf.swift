@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import CryptoKit
 import Foundation
 import Observation
 import UIKit
@@ -14,11 +13,18 @@ final class MediaShelf {
 
     private(set) var items: [WindowsMedia] = []
     private(set) var job: WindowsDownload?
+    private(set) var recoveredISOs: [URL] = []
+    var completedISO: URL? {
+        guard let job, job.phase == .failed || job.phase == .paused else { return nil }
+        let file = Self.temporaryISO(for: job.token, in: Self.workspace)
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
     private(set) var busy = false
     private(set) var restoring = true
     private(set) var writtenBytes: Int64 = 0
     private(set) var expectedBytes: Int64 = 0
     private(set) var speed: Double = 0
+    private(set) var verificationFraction: Double?
     var error: String?
 
     @ObservationIgnored private var activeTask: URLSessionDownloadTask?
@@ -47,6 +53,7 @@ final class MediaShelf {
         } catch {
             self.error = error.localizedDescription
         }
+        refreshRecoveredISOs()
         session.getAllTasks { tasks in
             Task { @MainActor in self.restore(tasks) }
         }
@@ -64,7 +71,7 @@ final class MediaShelf {
                     try VMFiles.withFileAccess(source) { source in
                         try repository.store(source: source, name: source.deletingPathExtension().lastPathComponent,
                                              linking: false, checksum: checksum) { file in
-                            try Self.inspect(file, checksum: checksum)
+                            try WindowsISO.inspect(file, expectedSHA256: checksum)
                         }
                     }
                 }.value
@@ -127,13 +134,50 @@ final class MediaShelf {
         })
     }
 
-    func resume() {
-        guard !restoring, var job, job.phase == .paused || job.phase == .failed else { return }
-        let received = Self.temporaryISO(for: job.token, in: Self.workspace)
-        if FileManager.default.fileExists(atPath: received.path) {
-            acceptDownload(token: job.token, at: received)
-            return
+    func revalidate(checksum: String) throws {
+        guard !restoring, var job, let completedISO else { return }
+        if let updated = try WindowsDownload.normalizedChecksum(checksum) {
+            job.checksum = updated
         }
+        save(job)
+        acceptDownload(token: job.token, at: completedISO)
+    }
+
+    func validateRecovered(_ file: URL, checksum: String?) {
+        guard !busy, recoveredISOs.contains(file) else { return }
+        busy = true
+        let store = repository
+        Task {
+            defer { busy = false }
+            do {
+                let checksum = try WindowsDownload.normalizedChecksum(checksum)
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try store.store(source: file, name: "Windows 11 24H2 ARM64", linking: true,
+                                    checksum: checksum) { file in
+                        try WindowsISO.inspect(file, expectedSHA256: checksum)
+                    }
+                }.value
+                try FileManager.default.removeItem(at: file)
+                refreshRecoveredISOs()
+                try refresh()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func discardRecovered(_ file: URL) {
+        guard !busy, recoveredISOs.contains(file) else { return }
+        do {
+            try FileManager.default.removeItem(at: file)
+            refreshRecoveredISOs()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func resume() {
+        guard !restoring, completedISO == nil, var job, job.phase == .paused || job.phase == .failed else { return }
         let resumeData = job.resumeData
         job.prepareRetry()
         let task: URLSessionDownloadTask
@@ -178,7 +222,7 @@ final class MediaShelf {
         guard var job, validatingToken == nil else { return }
         let received = Self.temporaryISO(for: job.token, in: Self.workspace)
         if FileManager.default.fileExists(atPath: received.path) {
-            acceptDownload(token: job.token, at: received)
+            if job.phase != .failed { acceptDownload(token: job.token, at: received) }
             return
         }
         let running = tasks.first { $0.taskDescription == job.token.uuidString } as? URLSessionDownloadTask
@@ -243,11 +287,12 @@ final class MediaShelf {
 
     fileprivate func acceptDownload(token: UUID, at file: URL) {
         guard var job, job.token == token else {
-            try? FileManager.default.removeItem(at: file)
+            refreshRecoveredISOs()
             return
         }
         guard validatingToken != token else { return }
         validatingToken = token
+        verificationFraction = nil
         // A completed background download always takes precedence over a racing pause callback.
         job.didStageFile(token: token)
         save(job)
@@ -255,25 +300,38 @@ final class MediaShelf {
         let download = job
         let store = repository
         Task {
-            defer { validatingToken = nil }
+            defer {
+                validatingToken = nil
+                verificationFraction = nil
+            }
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
                     try store.store(source: file, name: "Windows 11 24H2 ARM64", linking: true,
                                     id: download.id, checksum: download.checksum) { file in
-                        try Self.inspect(file, checksum: download.checksum)
+                        try WindowsISO.inspect(file, expectedSHA256: download.checksum) { bytes, total in
+                            Task { @MainActor in
+                                guard self.validatingToken == token, total > 0 else { return }
+                                self.verificationFraction = Double(bytes) / Double(total)
+                            }
+                        }
                     }
                 }.value
             } catch {
-                if error is VMError { try? FileManager.default.removeItem(at: file) }
                 var failed = download
                 failed.phase = .failed
                 failed.failure = error.localizedDescription
                 save(failed)
                 return
             }
-            clear(download)
-            do { try refresh() }
-            catch { self.error = error.localizedDescription }
+            do {
+                try refresh()
+                clear(download)
+            } catch {
+                var failed = download
+                failed.phase = .failed
+                failed.failure = error.localizedDescription
+                save(failed)
+            }
         }
     }
 
@@ -311,19 +369,12 @@ final class MediaShelf {
         workspace.appendingPathComponent(token.uuidString).appendingPathExtension("iso")
     }
 
-    nonisolated private static func inspect(_ file: URL, checksum: String?) throws -> [WindowsImage] {
-        let images = try WindowsISO.inspect(file)
-        if let checksum {
-            let input = try FileHandle(forReadingFrom: file)
-            defer { try? input.close() }
-            var digest = SHA256()
-            while let chunk = try input.read(upToCount: 1 << 20), !chunk.isEmpty {
-                digest.update(data: chunk)
-            }
-            let actual = digest.finalize().map { String(format: "%02x", $0) }.joined()
-            guard checksum == actual else { throw VMError.message("The ISO does not match the supplied SHA-256 checksum.") }
-        }
-        return images
+    private func refreshRecoveredISOs() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: Self.workspace, includingPropertiesForKeys: nil)) ?? []
+        recoveredISOs = files.filter {
+            $0.pathExtension == "iso" && $0.deletingPathExtension().lastPathComponent != job?.token.uuidString &&
+                UUID(uuidString: $0.deletingPathExtension().lastPathComponent) != nil
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 }
 

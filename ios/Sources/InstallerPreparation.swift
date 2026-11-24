@@ -3,7 +3,7 @@ import Foundation
 
 struct InstallerProgress: Sendable {
     enum Stage: String, Sendable {
-        case checking = "Checking Windows installation media"
+        case checking = "Checking installation media SHA-256"
         case winPE = "Preparing Windows PE"
         case installer = "Writing the installer disk"
     }
@@ -24,7 +24,8 @@ enum InstallerPreparation {
         }
     }
 
-    static func build(iso: URL, output: URL, drivers: URL? = nil, edition: Int? = nil, progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
+    static func build(iso: URL, output: URL, expectedSHA256: String?, drivers: URL? = nil,
+                      edition: Int? = nil, progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
         try Task.checkCancellation()
         let manager = FileManager.default
         if manager.fileExists(atPath: output.path) {
@@ -35,8 +36,10 @@ enum InstallerPreparation {
         }
 
         progress(InstallerProgress(stage: .checking, copied: 0, total: 0))
-        let images = try WindowsISO.inspect(iso)
-        if let edition, !images.contains(where: { $0.index == edition }) {
+        let inspection = try WindowsISO.inspect(iso, expectedSHA256: expectedSHA256) { bytes, total in
+            progress(InstallerProgress(stage: .checking, copied: bytes, total: total))
+        }
+        if let edition, !inspection.images.contains(where: { $0.index == edition }) {
             throw VMError.message("The selected Windows edition is missing from this ISO.")
         }
         let parent = output.deletingLastPathComponent()
@@ -59,7 +62,7 @@ enum InstallerPreparation {
             }
         }
         guard winPEResult == 0 else {
-            throw VMError.message("Could not prepare Windows PE. \(String(cString: error))")
+            throw VMError.message("Could not prepare Windows PE. \(installerMessage(error))")
         }
 
         sink.setStage(.installer)
@@ -75,10 +78,14 @@ enum InstallerPreparation {
         }
         withExtendedLifetime(sink) {}
         guard diskResult == 0 else {
-            throw VMError.message("Could not write the installer disk. \(String(cString: error))")
+            throw VMError.message("Could not write the installer disk. \(installerMessage(error))")
         }
         try Task.checkCancellation()
         try manager.linkItem(at: stagedDisk, to: output)
+    }
+
+    private static func installerMessage(_ buffer: [CChar]) -> String {
+        String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }
 

@@ -8,6 +8,8 @@ struct MediaLibraryView: View {
     @State private var showDownloadForm = false
     @State private var checksum = ""
     @State private var removeCandidate: WindowsMedia?
+    @State private var export: ISOExport?
+    @State private var discard: ISOExport?
 
     var body: some View {
         List {
@@ -28,11 +30,34 @@ struct MediaLibraryView: View {
             }
             if let job = shelf.job {
                 Section("Download") {
-                    DownloadStatusView(shelf: shelf, job: job)
+                    DownloadStatusView(shelf: shelf, job: job, checksum: checksum,
+                                       export: { export = ISOExport(url: $0) },
+                                       discard: { discard = ISOExport(url: $0) })
+                }
+            }
+            if !shelf.recoveredISOs.isEmpty {
+                Section("Recovered downloads") {
+                    ForEach(shelf.recoveredISOs, id: \.self) { file in
+                        Menu {
+                            Button("Revalidate ISO", systemImage: "checkmark.shield") {
+                                shelf.validateRecovered(file, checksum: checksum)
+                            }
+                            Button("Export ISO", systemImage: "square.and.arrow.up") { export = ISOExport(url: file) }
+                            Button(role: .destructive) {
+                                discard = ISOExport(url: file)
+                            } label: {
+                                Label("Discard ISO", systemImage: "trash")
+                            }
+                        } label: {
+                            Label("Recovered ISO · \(formattedBytes(Int64((try? regularFileSize(file)) ?? 0)))",
+                                  systemImage: "opticaldisc")
+                        }
+                        .disabled(shelf.busy)
+                    }
                 }
             }
             if shelf.busy {
-                ProgressView("Importing and inspecting ISO…")
+                ProgressView("Checking SHA-256 and inspecting ISO…")
             }
             Section("Verified media") {
                 if shelf.items.isEmpty {
@@ -43,6 +68,9 @@ struct MediaLibraryView: View {
                         Text(item.name).font(.headline)
                         Text("ARM64 · Build 26100 · \(formattedBytes(Int64(item.bytes)))")
                             .foregroundStyle(.secondary).font(.subheadline)
+                        if let filesystem = item.filesystem {
+                            Text(filesystem).font(.caption).foregroundStyle(.secondary)
+                        }
                         if item.sha256 != nil {
                             Label("SHA-256 matched", systemImage: "checkmark.shield")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -53,6 +81,11 @@ struct MediaLibraryView: View {
                             .disabled(shelf.busy)
                     }
                     .contextMenu {
+                        if let diagnostics = item.diagnostics, let hash = item.computedSHA256 {
+                            ShareLink(item: "\(diagnostics)\nSHA-256: \(hash)") {
+                                Label("Share Media Diagnostics", systemImage: "doc.text")
+                            }
+                        }
                         Button("Remove Stored ISO", role: .destructive) { removeCandidate = item }
                             .disabled(shelf.busy)
                     }
@@ -70,6 +103,18 @@ struct MediaLibraryView: View {
         } message: { item in
             Text("This removes the app’s stored copy of \(item.name).")
         }
+        .confirmationDialog("Discard this downloaded ISO?", isPresented: Binding(
+            get: { discard != nil }, set: { if !$0 { discard = nil } }
+        ), presenting: discard) { item in
+            Button("Discard ISO", role: .destructive) {
+                if shelf.completedISO == item.url { shelf.cancel() }
+                else { shelf.discardRecovered(item.url) }
+                discard = nil
+            }
+        } message: { _ in
+            Text("This removes the retained download from the app.")
+        }
+        .sheet(item: $export) { FolderExporter(url: $0.url) }
         .task { shelf.open() }
         .fileImporter(isPresented: $showImport, allowedContentTypes: [UTType(filenameExtension: "iso") ?? .data]) { result in
             switch result {
@@ -92,9 +137,17 @@ struct MediaLibraryView: View {
     }
 }
 
+private struct ISOExport: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
 private struct DownloadStatusView: View {
     let shelf: MediaShelf
     let job: WindowsDownload
+    let checksum: String
+    let export: (URL) -> Void
+    let discard: (URL) -> Void
 
     var body: some View {
         switch job.phase {
@@ -113,16 +166,34 @@ private struct DownloadStatusView: View {
             ProgressView("Pausing download…")
         case .paused, .failed:
             if let failure = job.failure {
-                Text(failure).foregroundStyle(.secondary)
+                Text(failure).foregroundStyle(.secondary).textSelection(.enabled)
             } else {
                 Text("Paused")
             }
-            Button(job.resumeData == nil ? "Restart Download" : "Resume Download", systemImage: "play") { shelf.resume() }
+            if let file = shelf.completedISO {
+                Button("Revalidate ISO", systemImage: "checkmark.shield") {
+                    do { try shelf.revalidate(checksum: checksum) }
+                    catch { shelf.error = error.localizedDescription }
+                }
                 .disabled(shelf.restoring)
+                Button("Export ISO", systemImage: "square.and.arrow.up") { export(file) }
+                if let failure = job.failure {
+                    ShareLink(item: failure) { Label("Share Validation Details", systemImage: "doc.text") }
+                }
+                Button("Discard ISO", role: .destructive) { discard(file) }
+                    .disabled(shelf.restoring)
+            } else {
+                Button(job.resumeData == nil ? "Restart Download" : "Resume Download", systemImage: "play") { shelf.resume() }
+                    .disabled(shelf.restoring)
+            }
         case .verifying:
-            ProgressView("Checking ARM64 media and build number…")
+            if let fraction = shelf.verificationFraction, fraction < 1 {
+                ProgressView("Checking ISO SHA-256…", value: fraction)
+            } else {
+                ProgressView("Validating ISO and Windows 24H2 ARM64…")
+            }
         }
-        if job.phase != .verifying {
+        if job.phase != .verifying && shelf.completedISO == nil {
             Button("Cancel Download", role: .destructive) { shelf.cancel() }
                 .disabled(shelf.restoring)
         }

@@ -2,5 +2,6 @@
 #import "winios_bridge.h"
 #include "winios_jit.h"
 #include "hvsparse.h"
-#include <udfread/udfread.h>
+#include "disc_image.h"
+#include "media_hash.h"
 #include "installer_winpe.h"

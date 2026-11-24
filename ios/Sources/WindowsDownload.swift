@@ -8,7 +8,7 @@ struct WindowsDownload: Codable, Equatable {
 
     let id: UUID
     let source: URL
-    let checksum: String?
+    var checksum: String?
     var token: UUID
     var phase: Phase
     var resumeData: Data?

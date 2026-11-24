@@ -1,12 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Foundation
 
+struct WindowsISOInspection: Sendable {
+    let images: [WindowsImage]
+    let computedSHA256: String
+    let filesystem: String
+    let diagnostics: String
+}
+
 struct WindowsMedia: Codable, Equatable, Identifiable {
     let id: UUID
     let name: String
     let bytes: UInt64
     let images: [WindowsImage]
     let sha256: String?
+    let computedSHA256: String?
+    let filesystem: String?
+    let diagnostics: String?
+
+    var savedChecksum: String? { sha256 ?? computedSHA256 }
 }
 
 struct WindowsMediaRepository: Sendable {
@@ -42,7 +54,7 @@ struct WindowsMediaRepository: Sendable {
     }
 
     func store(source: URL, name: String, linking: Bool, id: UUID = UUID(),
-               checksum: String?, inspect: (URL) throws -> [WindowsImage]) throws -> WindowsMedia {
+               checksum: String?, inspect: (URL) throws -> WindowsISOInspection) throws -> WindowsMedia {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         #if os(iOS)
@@ -71,8 +83,10 @@ struct WindowsMediaRepository: Sendable {
         } else {
             try fm.copyItem(at: source, to: iso)
         }
-        let images = try inspect(iso)
-        let item = WindowsMedia(id: id, name: name, bytes: bytes, images: images, sha256: checksum)
+        let inspection = try inspect(iso)
+        let item = WindowsMedia(id: id, name: name, bytes: bytes, images: inspection.images,
+                                sha256: checksum, computedSHA256: inspection.computedSHA256,
+                                filesystem: inspection.filesystem, diagnostics: inspection.diagnostics)
         try PropertyListEncoder().encode(item).write(to: stage.appendingPathComponent("Media.plist"), options: .atomic)
         try fm.moveItem(at: stage, to: target)
         return item

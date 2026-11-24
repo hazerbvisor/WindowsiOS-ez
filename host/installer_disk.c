@@ -15,7 +15,7 @@
 
 #include <fatfs/ff.h>
 #include <fatfs/diskio.h>
-#include <udfread/udfread.h>
+#include "disc_image.h"
 
 enum {
     SECTOR = 512,
@@ -197,7 +197,7 @@ static int note_progress(InstallerBuild *build) {
     return 0;
 }
 
-static int stream_file(InstallerBuild *build, UDFFILE *input, int input_fd, const char *path, uint64_t length) {
+static int stream_file(InstallerBuild *build, DiscFile *input, int input_fd, const char *path, uint64_t length) {
     FIL output;
     if (f_open(&output, path, FA_CREATE_NEW | FA_WRITE) != FR_OK)
         return fail(build, "An installer file could not be created. Check for duplicate or invalid media filenames.");
@@ -206,7 +206,7 @@ static int stream_file(InstallerBuild *build, UDFFILE *input, int input_fd, cons
     while (length) {
         UINT piece = length < COPY_BUFFER ? (UINT)length : COPY_BUFFER;
         UINT written = 0;
-        if (input ? udfread_file_read(input, build->buffer, piece) != (ssize_t)piece
+        if (input ? disc_file_read(input, build->buffer, piece) != (ssize_t)piece
                   : transfer(input_fd, build->buffer, piece, offset, false) != 0) {
             result = fail(build, "A file inside the installation ISO is incomplete.");
             break;
@@ -238,33 +238,34 @@ static bool safe_name(const char *name) {
     return true;
 }
 
-static int walk(InstallerBuild *build, UDFDIR *dir, const char *prefix, int depth, bool copying) {
+static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, int depth, bool copying) {
     if (depth >= MAX_DEPTH) return fail(build, "An installer directory is nested too deeply.");
-    struct udfread_dirent entry;
-    while (udfread_readdir(dir, &entry)) {
-        if (!entry.d_name) continue;
-        if (!strcmp(entry.d_name, ".") || !strcmp(entry.d_name, "..")) continue;
-        if (!safe_name(entry.d_name)) return fail(build, "The ISO contains an unsupported filename.");
+    DiscEntry entry;
+    int status;
+    while ((status = disc_readdir(dir, &entry)) == 1) {
+        if (!entry.name) continue;
+        if (!strcmp(entry.name, ".") || !strcmp(entry.name, "..")) continue;
+        if (!safe_name(entry.name)) return fail(build, "The ISO contains an unsupported filename.");
         char path[PATH_LENGTH];
-        int count = snprintf(path, sizeof(path), "0:%s/%s", prefix, entry.d_name);
+        int count = snprintf(path, sizeof(path), "0:%s/%s", prefix, entry.name);
         if (count < 0 || (size_t)count >= sizeof(path)) return fail(build, "An installer path is too long.");
-        if (entry.d_type == UDF_DT_DIR) {
+        if (entry.type == DISC_DIR) {
             if (copying && f_mkdir(path) != FR_OK) return fail(build, "An installer folder could not be created.");
-            UDFDIR *child = udfread_opendir_at(dir, entry.d_name);
+            DiscDirectory *child = disc_opendir_at(dir, entry.name);
             if (!child) return fail(build, "An installer folder could not be read.");
             int result = walk(build, child, path + 2, depth + 1, copying);
-            udfread_closedir(child);
+            disc_closedir(child);
             if (result) return result;
             continue;
         }
-        if (entry.d_type != UDF_DT_REG) return fail(build, "The ISO contains an unsupported file type.");
+        if (entry.type != DISC_REG) return fail(build, "The ISO contains an unsupported file type.");
         bool payload = !strcasecmp(prefix, "/sources") &&
-            (!strcasecmp(entry.d_name, "install.wim") || !strcasecmp(entry.d_name, "install.esd"));
-        UDFFILE *file = udfread_file_openat(dir, entry.d_name);
+            (!strcasecmp(entry.name, "install.wim") || !strcasecmp(entry.name, "install.esd"));
+        DiscFile *file = disc_open_at(dir, entry.name);
         if (!file) return fail(build, "An installer file could not be opened.");
         bool is_boot_wim = !strcasecmp(path + 2, "/sources/boot.wim");
         bool use_prepared_wim = is_boot_wim && build->boot_wim_fd >= 0;
-        int64_t length = use_prepared_wim ? (int64_t)build->boot_wim_size : udfread_file_size(file);
+        int64_t length = use_prepared_wim ? (int64_t)build->boot_wim_size : disc_file_size(file);
         int result = 0;
         if (length < 0 || (!use_prepared_wim && (uint64_t)length > build->iso_size)) {
             result = fail(build, "An installer file size exceeds the ISO.");
@@ -288,10 +289,10 @@ static int walk(InstallerBuild *build, UDFDIR *dir, const char *prefix, int dept
             if (!strcasecmp(path + 2, "/efi/microsoft/boot/bcd") ||
                 !strcasecmp(path + 2, "/boot/bcd")) build->boot_bcd = length > 0;
         }
-        udfread_file_close(file);
+        disc_file_close(file);
         if (result) return result;
     }
-    return 0;
+    return status < 0 ? fail(build, "A directory in the ISO is malformed or incomplete.") : 0;
 }
 
 static int stage_drivers(InstallerBuild *build, const char *directory, bool copying) {
@@ -370,8 +371,8 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
                                 char *error, size_t error_size) {
     InstallerBuild build = {.boot_wim_fd = -1, .progress = progress, .context = context, .error = error, .error_size = error_size};
     struct stat info;
-    udfread *udf = NULL;
-    UDFDIR *root = NULL;
+    DiscImage *image = NULL;
+    DiscDirectory *root = NULL;
     FATFS boot, payload;
     char *staging = NULL;
     int result = -1;
@@ -389,9 +390,11 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
         }
         build.boot_wim_size = (uint64_t)info.st_size;
     }
-    udf = udfread_init();
-    if (!udf || udfread_open(udf, iso_path) != 0 || !(root = udfread_opendir(udf, "/"))) {
-        fail(&build, "The installation ISO has no readable UDF filesystem.");
+    image = disc_open_windows(iso_path, error, error_size);
+    if (!image) goto done;
+    root = disc_root(image);
+    if (!root) {
+        fail(&build, "The installation ISO root directory could not be opened.");
         goto done;
     }
     if (walk(&build, root, "", 0, false) || stage_drivers(&build, driver_directory, false) ||
@@ -435,7 +438,7 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
         goto done;
     }
     if (format_partitions(&build, &boot, &payload)) goto done;
-    udfread_rewinddir(root);
+    disc_rewinddir(root);
     if (walk(&build, root, "", 0, true) || stage_drivers(&build, driver_directory, true) ||
         stage_answer(&build, answer_path, true)) goto done;
     if (build.copied != build.total || fsync(image_fd)) {
@@ -457,8 +460,8 @@ done:
         if (staging) unlink(staging);
     }
     if (build.boot_wim_fd >= 0) close(build.boot_wim_fd);
-    if (root) udfread_closedir(root);
-    if (udf) udfread_close(udf);
+    if (root) disc_closedir(root);
+    disc_close(image);
     free(staging);
     free(build.buffer);
     pthread_mutex_unlock(&volume_lock);

@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <udfread/udfread.h>
+#include "disc_image.h"
 #include <wimlib.h>
 
 enum { BUFFER_SIZE = 512 << 10 };
@@ -80,35 +80,17 @@ static int write_script(const char *path, const char *contents, size_t length) {
     return result;
 }
 
-static UDFDIR *open_sources(UDFDIR *root) {
-    struct udfread_dirent entry;
-    while (udfread_readdir(root, &entry)) {
-        if (entry.d_type == UDF_DT_DIR && entry.d_name && !strcasecmp(entry.d_name, "sources"))
-            return udfread_opendir_at(root, entry.d_name);
-    }
-    return NULL;
-}
-
-static UDFFILE *open_boot_wim(UDFDIR *sources) {
-    struct udfread_dirent entry;
-    while (udfread_readdir(sources, &entry)) {
-        if (entry.d_type == UDF_DT_REG && entry.d_name && !strcasecmp(entry.d_name, "boot.wim"))
-            return udfread_file_openat(sources, entry.d_name);
-    }
-    return NULL;
-}
-
 static const char *extract_wim(const char *iso_path, const char *wim_path,
-                               WinIOSInstallerProgress progress, void *context) {
+                               WinIOSInstallerProgress progress, void *context,
+                               char *diagnostic, size_t diagnostic_size) {
     const char *error = "Windows PE could not be found in the ISO.";
-    udfread *volume = udfread_init();
-    UDFDIR *root = NULL, *sources = NULL;
-    UDFFILE *wim = NULL;
+    DiscImage *image = disc_open_windows(iso_path, diagnostic, diagnostic_size);
+    if (!image) return diagnostic;
+    DiscFile *wim = disc_open_path(image, "sources/boot.wim");
     char *buffer = NULL;
     int output = -1;
-    if (!volume || udfread_open(volume, iso_path) != 0 || !(root = udfread_opendir(volume, "/")) ||
-        !(sources = open_sources(root)) || !(wim = open_boot_wim(sources))) goto done;
-    int64_t size = udfread_file_size(wim);
+    if (!wim) goto done;
+    int64_t size = disc_file_size(wim);
     if (size <= 0 || size > UINT32_MAX) goto done;
     output = open(wim_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     buffer = malloc(BUFFER_SIZE);
@@ -121,7 +103,7 @@ static const char *extract_wim(const char *iso_path, const char *wim_path,
     uint64_t copied = 0;
     while (copied < total) {
         size_t count = total - copied > BUFFER_SIZE ? BUFFER_SIZE : (size_t)(total - copied);
-        if (udfread_file_read(wim, buffer, count) != (ssize_t)count || write_all(output, buffer, count)) {
+        if (disc_file_read(wim, buffer, count) != (ssize_t)count || write_all(output, buffer, count)) {
             error = "Windows PE could not be copied from the ISO.";
             goto done;
         }
@@ -138,10 +120,8 @@ done:
         if (error) unlink(wim_path);
     }
     free(buffer);
-    if (wim) udfread_file_close(wim);
-    if (sources) udfread_closedir(sources);
-    if (root) udfread_closedir(root);
-    if (volume) udfread_close(volume);
+    disc_file_close(wim);
+    disc_close(image);
     return error;
 }
 
@@ -183,7 +163,8 @@ int winios_prepare_winpe_wim(const char *iso_path, const char *work_directory,
     bool owned_wim = false, owned_ini = false, owned_cmd = false;
     if (!wim || !ini || !cmd) goto done;
 
-    failure = extract_wim(iso_path, wim, progress, context);
+    char diagnostic[512];
+    failure = extract_wim(iso_path, wim, progress, context, diagnostic, sizeof(diagnostic));
     if (failure) goto done;
     owned_wim = true;
     failure = "Windows PE startup files could not be staged.";

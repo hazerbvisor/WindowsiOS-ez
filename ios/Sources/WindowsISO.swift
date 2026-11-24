@@ -2,64 +2,74 @@
 import Foundation
 
 enum WindowsISO {
-    static func inspect(_ url: URL) throws -> [WindowsImage] {
-        let size = try regularFileSize(url)
-        guard size > 256 * 2048, size % 2048 == 0, let volume = udfread_init() else {
-            throw VMError.message("Choose a complete Windows ARM64 ISO file.")
+    static func inspect(_ url: URL, expectedSHA256: String? = nil,
+                        progress: (@Sendable (UInt64, UInt64) -> Void)? = nil) throws -> WindowsISOInspection {
+        let checksum = try WindowsDownload.normalizedChecksum(expectedSHA256)
+        let hex = try hash(url, progress: progress)
+        if let checksum, checksum != hex {
+            throw VMError.message("SHA-256 mismatch. Expected \(checksum). Read \(hex). Filesystem inspection was skipped.")
         }
-        defer { udfread_close(volume) }
-        let opened = url.withUnsafeFileSystemRepresentation { path in
-            guard let path else { return false }
-            return udfread_open(volume, path) == 0
-        }
-        guard opened, let root = udfread_opendir(volume, "/") else {
-            throw VMError.message("The ISO does not contain a readable UDF filesystem.")
-        }
-        defer { udfread_closedir(root) }
 
-        guard let efi = open(in: root, names: ["efi"], using: udfread_opendir_at) else {
-            throw VMError.message("The ISO has no EFI boot directory.")
+        var diagnostic = [CChar](repeating: 0, count: 512)
+        let image = url.withUnsafeFileSystemRepresentation { path in
+            disc_open_windows(path, &diagnostic, diagnostic.count)
         }
-        defer { udfread_closedir(efi) }
-        guard let boot = open(in: efi, names: ["boot"], using: udfread_opendir_at) else {
-            throw VMError.message("The ISO has no EFI boot directory.")
+        let detection = decodeCString(diagnostic)
+        let integrity = checksum == nil ? "Computed SHA-256" : "Verified SHA-256"
+        guard let image else {
+            throw VMError.message("Could not read Windows setup media. \(detection) \(integrity): \(hex).")
         }
-        defer { udfread_closedir(boot) }
-        guard let loader = open(in: boot, names: ["bootaa64.efi"], using: udfread_file_openat) else {
-            throw VMError.message("The ISO has no ARM64 UEFI boot loader.")
-        }
-        defer { udfread_file_close(loader) }
-        try requireARM64Loader(loader)
+        defer { disc_close(image) }
 
-        guard let sources = open(in: root, names: ["sources"], using: udfread_opendir_at) else {
-            throw VMError.message("The ISO has no Windows installation sources.")
+        do {
+            guard let loader = disc_open_path(image, "efi/boot/bootaa64.efi") else {
+                throw VMError.message("The ISO has no readable ARM64 UEFI boot loader.")
+            }
+            defer { disc_file_close(loader) }
+            try requireARM64Loader(loader)
+            let bootImages = try readImages(image, paths: ["sources/boot.wim"])
+            try WindowsImageMetadata.requireBaseline(bootImages, media: "Windows PE")
+            let installImages = try readImages(image, paths: ["sources/install.wim", "sources/install.esd"])
+            try WindowsImageMetadata.requireBaseline(installImages, media: "Windows installation image")
+            return WindowsISOInspection(images: installImages, computedSHA256: hex,
+                                        filesystem: String(cString: disc_filesystem(image)), diagnostics: detection)
+        } catch {
+            throw VMError.message("\(error.localizedDescription) \(detection) \(integrity): \(hex).")
         }
-        defer { udfread_closedir(sources) }
-        let bootImages = try readImages(in: sources, names: ["boot.wim"])
-        try WindowsImageMetadata.requireBaseline(bootImages, media: "Windows PE")
-        let installImages = try readImages(in: sources, names: ["install.wim", "install.esd"])
-        try WindowsImageMetadata.requireBaseline(installImages, media: "Windows installation image")
-        return installImages
     }
 
-    private static func open(in dir: OpaquePointer, names: Set<String>,
-                             using opener: (OpaquePointer?, UnsafePointer<CChar>?) -> OpaquePointer?) -> OpaquePointer? {
-        udfread_rewinddir(dir)
-        var entry = udfread_dirent()
-        while udfread_readdir(dir, &entry) != nil {
-            if let raw = entry.d_name, let name = String(validatingUTF8: raw), names.contains(name.lowercased()) {
-                return opener(dir, raw)
+    private static func hash(_ url: URL, progress: (@Sendable (UInt64, UInt64) -> Void)?) throws -> String {
+        let sink = ISOHashProgress(progress: progress)
+        let context = Unmanaged.passUnretained(sink).toOpaque()
+        var hex = [CChar](repeating: 0, count: 65)
+        let result = url.withUnsafeFileSystemRepresentation { path in
+            media_sha256(path, &hex, isoHashProgress, context)
+        }
+        withExtendedLifetime(sink) {}
+        try Task.checkCancellation()
+        guard result == 0 else {
+            throw VMError.message("Could not compute SHA-256 for the complete ISO. Check that the file is readable.")
+        }
+        return decodeCString(hex)
+    }
+
+    private static func decodeCString(_ bytes: [CChar]) -> String {
+        String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private static func readImages(_ image: OpaquePointer, paths: [String]) throws -> [WindowsImage] {
+        var opened: OpaquePointer?
+        for path in paths {
+            if let file = disc_open_path(image, path) {
+                opened = file
+                break
             }
         }
-        return nil
-    }
-
-    private static func readImages(in directory: OpaquePointer, names: Set<String>) throws -> [WindowsImage] {
-        guard let file = open(in: directory, names: names, using: udfread_file_openat) else {
-            throw VMError.message("The ISO is missing \(names.sorted().joined(separator: " or ")).")
+        guard let file = opened else {
+            throw VMError.message("The ISO is missing \(paths.joined(separator: " or ")).")
         }
-        defer { udfread_file_close(file) }
-        let length = udfread_file_size(file)
+        defer { disc_file_close(file) }
+        let length = disc_file_size(file)
         guard length >= 96 else { throw VMError.message("A Windows image inside the ISO is empty or truncated.") }
         return try WindowsImageMetadata.read(length: UInt64(length)) { offset, count in
             try read(file, offset: offset, count: count)
@@ -78,14 +88,33 @@ enum WindowsISO {
     }
 
     private static func read(_ file: OpaquePointer, offset: UInt64, count: Int) throws -> Data {
-        guard offset <= Int64.max, udfread_file_seek(file, Int64(offset), Int32(UDF_SEEK_SET)) == Int64(offset) else {
-            throw VMError.message("The ISO contains an invalid file offset.")
-        }
         var data = Data(count: count)
         let result = data.withUnsafeMutableBytes { bytes in
-            udfread_file_read(file, bytes.baseAddress, bytes.count)
+            disc_file_pread(file, bytes.baseAddress, bytes.count, offset)
         }
-        guard result == count else { throw VMError.message("A file inside the ISO is truncated.") }
+        guard result == count else { throw VMError.message("A file inside the ISO is truncated or the filesystem could not read it.") }
         return data
     }
+}
+
+private final class ISOHashProgress {
+    let progress: (@Sendable (UInt64, UInt64) -> Void)?
+    var lastUpdate = Date.distantPast
+
+    init(progress: (@Sendable (UInt64, UInt64) -> Void)?) { self.progress = progress }
+}
+
+private let isoHashProgress: @convention(c) (UInt64, UInt64, UnsafeMutableRawPointer?) -> Int32 = { bytes, total, context in
+    if Task.isCancelled { return 1 }
+    if let context {
+        let sink = Unmanaged<ISOHashProgress>.fromOpaque(context).takeUnretainedValue()
+        if let progress = sink.progress {
+            let date = Date()
+            if bytes == total || date.timeIntervalSince(sink.lastUpdate) >= 0.2 {
+                sink.lastUpdate = date
+                progress(bytes, total)
+            }
+        }
+    }
+    return 0
 }

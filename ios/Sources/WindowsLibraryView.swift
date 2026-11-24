@@ -278,9 +278,11 @@ private struct MachineLibraryView: View {
     }
 
     private func buildInstaller(for mediaID: UUID, output: URL) {
-        let iso = MediaShelf.shared.repository.isoURL(for: mediaID)
+        let shelf = MediaShelf.shared
+        let iso = shelf.repository.isoURL(for: mediaID)
+        let checksum = shelf.items.first { $0.id == mediaID }?.savedChecksum
         doFileWork {
-            try InstallerPreparation.build(iso: iso, output: output) { _ in }
+            try InstallerPreparation.build(iso: iso, output: output, expectedSHA256: checksum) { _ in }
         }
     }
 
@@ -386,7 +388,7 @@ private struct VMExport: Identifiable {
     var id: URL { folder }
 }
 
-private struct FolderExporter: UIViewControllerRepresentable {
+struct FolderExporter: UIViewControllerRepresentable {
     let url: URL
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
