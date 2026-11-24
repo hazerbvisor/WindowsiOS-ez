@@ -1,9 +1,16 @@
 <div align="center">
 
-# WindowsiOS
+# WindowsiOS-ez
 
-**Full Microsoft Windows 11 24H2 ARM64 running at near-native JIT speed on non-jailbroken modern iOS.**  
-*Verified end-to-end on the foldable **iPhone Duo** (`iPhone19,4` · Apple A20 Pro · iOS 27 TXM) — without `Hypervisor.framework`.*
+WindowsiOS-ez is a WindowsiOS fork targeting a standalone iOS installation experience.
+See [BUILDING.md](BUILDING.md) for the manual Codemagic unsigned IPA workflow,
+[TESTING.md](TESTING.md) for physical-device verification, and
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current coverage.
+The sections below describe the upstream emulator and its legacy desktop provisioning workflow.
+
+**Upstream WindowsiOS demo**
+
+*The upstream project reported end-to-end verification on the foldable **iPhone Duo** (`iPhone19,4` · Apple A20 Pro · iOS 27 TXM) — without `Hypervisor.framework`.*
 
 [![License: GPL v2+](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Guest OS](https://img.shields.io/badge/Guest-Windows_11_24H2_ARM64_(Build_26100)-0078D4.svg)](#visual-showcase)
@@ -246,7 +253,7 @@ xcodebuild -project ios/WindowsiOS.xcodeproj -scheme WindowsiOS -configuration R
 # then launch --start-stopped, bless 384 MiB TXM JIT + 4,608 MiB ledger-exempt RAM via LLDB, and detach cleanly:
 xcrun devicectl device install app --device <DEVICE_UDID> \
   build/DerivedData/Build/Products/Release-iphoneos/WindowsiOS.app
-./scripts/launch_on_duo.sh <DEVICE_UDID> me.ammaar.windowsios
+./scripts/launch_on_duo.sh <DEVICE_UDID> <SIGNED_BUNDLE_ID>
 ```
 
 ---
