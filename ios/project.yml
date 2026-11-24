@@ -1,16 +1,13 @@
 name: WindowsiOS
 options:
-  bundleIdPrefix: me.ammaar
+  bundleIdPrefix: io.github.hazerbvisor
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "27.2"
 
 settings:
   base:
-    DEVELOPMENT_TEAM: 7S264298H8
     CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "Apple Development"
-    PROVISIONING_PROFILE_SPECIFIER: "WindowsiOS Duo Dev"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     SWIFT_VERSION: "5.0"
@@ -30,14 +27,14 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: Windows 11
+        CFBundleDisplayName: WindowsiOS-ez
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
-        NSMicrophoneUsageDescription: "Windows 11 and Antigravity use your iPhone Duo microphone for live voice input and audio capture."
+        NSMicrophoneUsageDescription: "Windows 11 and Antigravity use your device microphone for live voice input and audio capture."
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:
@@ -54,14 +51,13 @@ targets:
       path: WindowsiOS.entitlements
       properties:
         get-task-allow: true
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.kernel.extended-virtual-addressing: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: me.ammaar.windowsios
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.hazerbvisor.windowsios-ez
         PRODUCT_NAME: WindowsiOS
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "Apple Development: Ammaar Reshi (6U8W89GC8D)"
-        PROVISIONING_PROFILE_SPECIFIER: "WindowsiOS Duo Dev"
-        TARGETED_DEVICE_FAMILY: "1,2"
+        "ARCHS[sdk=iphoneos*]": arm64
         SWIFT_OBJC_BRIDGING_HEADER: $(PROJECT_DIR)/Sources/Native/WindowsiOS-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(inherited)

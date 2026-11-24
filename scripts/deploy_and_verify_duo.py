@@ -2,7 +2,7 @@
 """
 End-to-end post-OOBE verification, sparse packing, iPhone Duo staging/transfer,
 TXM JIT + 4096 MiB RAM launch, and live Windows 11 Pro 24H2 ARM64 Desktop capture
-on Ammaar's physical foldable iPhone Duo (00008160-000E05D036C0000A).
+on a paired physical iOS device.
 """
 
 import os
@@ -19,8 +19,8 @@ WINVM = ROOT / "build" / "winvm"
 HVSPARSE = ROOT / "build" / "hvsparse"
 LAUNCH_DUO = ROOT / "scripts" / "launch_on_duo.sh"
 
-UDID = "00008160-000E05D036C0000A"
-BUNDLE_ID = "me.ammaar.windowsios"
+UDID = os.environ.get("WINIOS_DEVICE_UDID")
+BUNDLE_ID = os.environ.get("WINIOS_BUNDLE_ID", "io.github.hazerbvisor.windowsios-ez")
 
 CODE_FD = WORK / "code.fd"
 VARS_CLEAN = WORK / "vars_clean.fd"
@@ -343,6 +343,8 @@ def launch_and_verify_on_duo():
 
 
 def main():
+    if not UDID:
+        sys.exit("Set WINIOS_DEVICE_UDID to the paired device identifier.")
     if "--skip-mac-verify" not in sys.argv:
         wait_for_oobe_completion()
         verify_mac_clean_desktop()
