@@ -55,6 +55,26 @@ class SparseDiskTests(unittest.TestCase):
             self.assertEqual(file.read(len(data)), data)
         self.assertTrue(self.archive.is_file())
 
+    def test_raw_sparse_copy_and_pack_are_non_destructive(self):
+        size = 64 << 30
+        source = self.work / "source.img"
+        with source.open("wb") as file:
+            file.truncate(size)
+            file.seek(size - 4)
+            file.write(b"data")
+
+        subprocess.run([self.tool, "copy", source, self.destination], check=True)
+        self.assertEqual(self.destination.stat().st_size, size)
+        self.assertLess(self.destination.stat().st_blocks * 512, 1 << 20)
+        with self.destination.open("rb") as file:
+            file.seek(size - 4)
+            self.assertEqual(file.read(), b"data")
+
+        self.assertNotEqual(subprocess.run([self.tool, "pack", source, source]).returncode, 0)
+        self.assertEqual(source.stat().st_size, size)
+        subprocess.run([self.tool, "pack", source, self.archive], check=True)
+        subprocess.run([self.tool, "validate", self.archive], check=True)
+
     def test_existing_destination_is_preserved(self):
         self.make_archive(4096, bytes(16))
         self.destination.write_bytes(b"existing data")
