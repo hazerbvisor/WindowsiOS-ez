@@ -21,7 +21,7 @@ Use a physical iPad Air M4 on iPadOS 27.0.1 and record the actual model, detecte
 2. In Files, stage your lawfully prepared Windows disk and its matching EDK2 `code.fd` and `vars.fd` under the app's `Machines/Win11` folder. Use `windows11.hvsparse` or `windows11.img`. Keep a backup of the disk and the writable variable store. For a sparse import test, use a fresh machine directory with no raw disk.
 3. Use the app's StikDebug action with an authorized debugger setup. Check that the runtime reports that its JIT self-test passed. For the upstream desktop fallback, use `xcrun devicectl list devices` on a paired Mac, copy the target CoreDevice ID and run `./scripts/launch_on_duo.sh DEVICE_ID SIGNED_BUNDLE_ID` with the guest shut down. Check the console for execution at both RX test offsets.
 4. Select the prepared VM in the library, launch it and verify the desktop and Windows build using Win+R then `winver`. Shut Windows down from the guest and relaunch the app. Confirm the firmware and guest edits persisted.
-5. Verify portrait and landscape display, touch and physical keyboard input, trackpad or mouse, audio output and mic permission, networking, guest file sharing and the guest-to-Safari OAuth path. The framebuffer test checks presentation.
+5. Verify portrait and landscape display, touch and physical keyboard input, trackpad or mouse, audio output and mic permission, networking, guest file sharing and the guest-to-Safari OAuth path. With a focused Windows text field, use the system paste action to type a single line of ASCII and verify it stops when you leave the session. The framebuffer test checks presentation.
 6. Export `boot_status.txt` through Files after checking it for details you wish to redact. Record physical RAM, process headroom, virtual and resident size, physical footprint, memory warnings, actual guest RAM and JIT capacity. Share screenshots of the guest only after checking for personal content. Keep pairing records and signing credentials local.
 7. Test sparse import with a broken archive and with a valid raw disk already present. Verify the archive stays in place and the existing disk remains unchanged. Collect file logical size and allocated size separately.
 
@@ -47,3 +47,6 @@ For the Linux installer tests, stage FatFs with `scripts/prepare_fatfs.sh` and s
 
 
 For the host TPM integration test, set `TPMS_INCLUDE` to the directory containing the libtpms headers and `TPMS_LIBRARY` to a host libtpms library. The suite also checks the emitted ACPI table and FDT without needing an iOS SDK.
+
+
+The optional ARM64 UEFI integration test uses `QEMU_AARCH64`, `EDK2_FIRMWARE`, `EFI_CLANG` and `EFI_LLD`, with `QEMU_DATA_DIR` if the QEMU ROMs are in a separate path. It builds a synthetic EFI application, boots it from the generated NVMe installer in QEMU and checks output from its entry point. It does not boot a Microsoft guest.

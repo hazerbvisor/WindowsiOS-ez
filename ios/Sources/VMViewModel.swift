@@ -89,6 +89,7 @@ final class VMViewModel: ObservableObject {
     @Published var rightClickArmed: Bool = false
     @Published var systemKeyboardVisible: Bool = false
     @Published var activeSafariURL: IdentifiableURL? = nil
+    @Published var clipboardError: String?
     @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
 
     private var bootDirectory: URL?
@@ -96,6 +97,7 @@ final class VMViewModel: ObservableObject {
     private var bootUsesTPM = false
     private var bootHardware = VMHardware()
     private var oauthPollTimer: Timer? = nil
+    private var clipboardTask: Task<Void, Never>?
 
     init() {
         let bridge = WinIOSBridge.shared
@@ -266,6 +268,37 @@ final class VMViewModel: ObservableObject {
         WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, useTPM: bootUsesTPM, ramMiB: UInt64(bootHardware.ramMiB),
                                   jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()
+    }
+
+    func typeClipboardText(_ text: String) {
+        guard isVMRunning, usbKeyboardReady, clipboardTask == nil else { return }
+        guard text.utf8.count <= 1024, text.utf8.allSatisfy({ (32...126).contains($0) }) else {
+            clipboardError = "Choose a single line of up to 1024 printable ASCII characters. The guest uses its active keyboard layout."
+            return
+        }
+        let keys = text.compactMap(MetalCanvasUIView.asciiToHID)
+        guard keys.count == text.count else {
+            clipboardError = "Some clipboard characters do not have a USB keyboard mapping."
+            return
+        }
+
+        clipboardTask = Task { @MainActor [weak self] in
+            defer { self?.clipboardTask = nil }
+            let bridge = WinIOSBridge.shared
+            for (key, shift) in keys {
+                guard !Task.isCancelled, bridge.isVMRunning else { break }
+                if shift { bridge.sendKeyHid(0xe1, down: true) }
+                bridge.sendKeyHid(key, down: true)
+                try? await Task.sleep(for: .milliseconds(25))
+                bridge.sendKeyHid(key, down: false)
+                if shift { bridge.sendKeyHid(0xe1, down: false) }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
+    }
+
+    func cancelClipboardTyping() {
+        clipboardTask?.cancel()
     }
 
     func requestStikDebugJIT() {

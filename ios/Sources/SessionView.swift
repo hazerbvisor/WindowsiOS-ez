@@ -50,6 +50,14 @@ struct SessionView: View {
             }
         }
         .ignoresSafeArea()
+        .alert("Clipboard Text", isPresented: Binding(
+            get: { vm.clipboardError != nil }, set: { if !$0 { vm.clipboardError = nil } }
+        )) {
+            Button("OK", role: .cancel) { vm.clipboardError = nil }
+        } message: {
+            Text(vm.clipboardError ?? "")
+        }
+        .onDisappear { vm.cancelClipboardTyping() }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .defersSystemGestures(on: .all)
@@ -489,6 +497,15 @@ struct SessionView: View {
                     active: vm.trackpadMode
                 ) {
                     vm.trackpadMode.toggle()
+                }
+
+                if vm.usbKeyboardReady {
+                    PasteButton(payloadType: String.self) { payload in
+                        if let text = payload.first { vm.typeClipboardText(text) }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Type clipboard text in Windows")
                 }
 
                 studioPillItem(icon: "computermouse", label: "R-Click", active: vm.rightClickArmed) {

@@ -174,6 +174,54 @@ int main(int argc, char **argv) {
         subprocess.run([self.binary, self.output, self.iso, "check"], check=True)
         self.assertEqual(self.output.stat().st_mtime_ns, before)
 
+    @unittest.skipUnless(all(os.environ.get(key) for key in ("QEMU_AARCH64", "EDK2_FIRMWARE", "EFI_CLANG", "EFI_LLD")),
+                         "ARM64 QEMU firmware or EFI toolchain is unavailable")
+    def test_armvirt_boots_generated_nvme_media(self):
+        source = self.work / "efi.c"
+        source.write_text(r"""
+typedef unsigned short CHAR16;
+typedef unsigned long long EFI_STATUS;
+typedef struct Output {
+    void *reset;
+    EFI_STATUS (*print)(struct Output *, const CHAR16 *);
+} Output;
+typedef void (*ResetSystem)(unsigned, EFI_STATUS, unsigned long long, void *);
+
+EFI_STATUS efi_main(void *image, void *system_table) {
+    (void)image;
+    Output *out = *(Output **)((char *)system_table + 64);
+    out->print(out, L"WindowsiOS FAT32 NVMe fixture reached EFI entry\r\n");
+    char *runtime = *(char **)((char *)system_table + 88);
+    ResetSystem shutdown = *(ResetSystem *)(runtime + 104);
+    shutdown(2, 0, 0, 0);
+    return 0;
+}
+""")
+        object_file = self.work / "efi.obj"
+        efi = self.source / "EFI/Boot/BOOTAA64.EFI"
+        subprocess.run([
+            os.environ["EFI_CLANG"], "--target=aarch64-pc-windows-msvc", "-ffreestanding",
+            "-fshort-wchar", "-fno-stack-protector", "-O2", "-c", source, "-o", object_file,
+        ], check=True)
+        subprocess.run([
+            os.environ["EFI_LLD"], "-flavor", "link", "/machine:arm64", "/subsystem:efi_application",
+            "/entry:efi_main", "/nodefaultlib", f"/out:{efi}", object_file,
+        ], check=True)
+        self.make_iso()
+        self.assertEqual(self.build().returncode, 0)
+        rom_path = os.environ.get("QEMU_DATA_DIR")
+        qemu = [os.environ["QEMU_AARCH64"]]
+        if rom_path:
+            qemu.extend(["-L", rom_path])
+        result = subprocess.run(qemu + [
+            "-machine", "virt,accel=tcg", "-cpu", "cortex-a57", "-m", "512",
+            "-bios", os.environ["EDK2_FIRMWARE"],
+            "-drive", f"if=none,format=raw,id=setup,file={self.output},readonly=on",
+            "-device", "nvme,drive=setup,serial=WIN11INST", "-nic", "none",
+            "-display", "none", "-serial", "stdio", "-monitor", "none",
+        ], capture_output=True, timeout=30, check=True)
+        self.assertIn(b"WindowsiOS FAT32 NVMe fixture reached EFI entry", result.stdout)
+
     def exfat_root_names(self):
         with self.output.open("rb") as disk:
             disk.seek(512 * 2 + 160)
