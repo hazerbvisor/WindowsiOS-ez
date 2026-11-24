@@ -233,7 +233,7 @@ if [ ! -f "$STAMPS/fatfs" ]; then
     touch "$STAMPS/fatfs"
 fi
 
-# 7. The TPM backend uses the OpenSSL crypto archive. Build device code only.
+# 7. Generate OpenSSL headers before building the crypto-only archive.
 if [ ! -f "$STAMPS/libcrypto" ]; then
     echo "[build] OpenSSL-3.5.9 libcrypto"
     ( cd "$SRC/openssl-3.5.9" \
@@ -241,6 +241,7 @@ if [ ! -f "$STAMPS/libcrypto" ]; then
       && export CROSS_TOP="$(dirname "$(dirname "$SDKROOT")")" \
                 CROSS_SDK="$(basename "$SDKROOT")" IPHONEOS_DEPLOYMENT_TARGET="$SDKMINVER" \
       && ./Configure ios64-xcrun no-shared no-asm no-apps no-tests no-module no-dso -miphoneos-version-min="$SDKMINVER" \
+      && make -j"$NCPU" build_generated \
       && make -j"$NCPU" libcrypto.a \
       && mkdir -p "$PREFIX/include/openssl" \
       && cp include/openssl/*.h "$PREFIX/include/openssl/" \

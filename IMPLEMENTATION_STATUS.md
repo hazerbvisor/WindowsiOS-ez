@@ -10,4 +10,6 @@
 
 Twenty automated tests passed in Linux, including eight Swift foundation groups, a UDF ISO fixture, and installer tests using independently read FAT32 and exFAT filesystems and a real WIM container with synthetic contents. Tests exercised TPM2 startup and random commands with libtpms, state persistence and corruption handling, firmware table emission, and disarming unattended Setup when a disk already has data. The firmware validator also accepted the code and Microsoft-enrolled variable-store headers from Debian’s AAVMF package. The guest session also has a system paste action for single-line keyboard text. Native SwiftUI and Objective-C iOS compilation, device input and bidirectional clipboard are unverified. The upstream core tests compiled their C classification object and then stopped at Apple ARM64 assembly on the x86-64 host.
 
+The first reported Codemagic build stopped during OpenSSL compilation because the generated headers were missing. The dependency script now generates them before building the crypto archive. The fixed iOS build still needs a manual retry.
+
 See [BUILDING.md](BUILDING.md), [TESTING.md](TESTING.md), [COMPATIBILITY.md](COMPATIBILITY.md) and [ROADMAP.md](ROADMAP.md).
