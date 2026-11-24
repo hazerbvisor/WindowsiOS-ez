@@ -17,14 +17,14 @@ The pipeline syncs submodules, installs missing tools, compiles device-only stat
 Use Xcode 27.2 with the iPhoneOS SDK selected and the license accepted. Install XcodeGen, Meson, Ninja, pkgconf and Python 3. The developer toolchain also supplies Clang, Make, `libtool`, `lipo` and `vtool`.
 
 ```sh
-HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen meson ninja pkgconf
+HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen meson ninja pkgconf autoconf automake libtool
 git submodule sync --recursive
 git submodule update --init --recursive
 ./scripts/build_unsigned_ipa.sh
 (cd build/artifacts && shasum -a 256 -c SHA256SUMS)
 ```
 
-Native dependency versions are libffi 3.5.0, GLib 2.83.0, libslirp v4.9.1 from the UTM mirror, libudfread 1.2.0, wimlib 1.14.5 and FatFs R0.16. All six archives are checksum-pinned. GLib's wraps pin PCRE2 10.44 and the `proxy-libintl` revision. These are device static archives and the app also links the platform resolver and iconv libraries. Dependency failure output includes the tail of the affected component's build log. Before distributing signed binaries, review the source and relinking obligations for the statically linked components. [Third-party notices](THIRD_PARTY_NOTICES.md)
+Native dependency versions are libffi 3.5.0, GLib 2.83.0, libslirp v4.9.1 from the UTM mirror, libudfread 1.2.0, wimlib 1.14.5, FatFs R0.16, libtpms 0.10.2 and OpenSSL 3.5.9. The source archives are checksum-pinned. GLib's wraps pin PCRE2 10.44 and the `proxy-libintl` revision. These are device static archives and the app also links the platform resolver and iconv libraries. Dependency failure output includes the tail of the affected component's build log. Before distributing signed binaries, review the source and relinking obligations for the statically linked components. [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Downstream signing
 
