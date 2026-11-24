@@ -112,4 +112,3 @@ private final class WIMMetadataParser: NSObject, XMLParserDelegate {
         text = ""
     }
 }
-
