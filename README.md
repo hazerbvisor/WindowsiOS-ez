@@ -2,7 +2,7 @@
 
 # WindowsiOS-ez
 
-WindowsiOS-ez adds a native VM library, a Windows 11 24H2 ARM64 media manager, and guided disk and firmware preparation to WindowsiOS. Use a prepared Windows disk for the existing guest boot path. On-device WinPE installation remains in development.
+WindowsiOS-ez adds a native VM library, a Windows 11 24H2 ARM64 media manager, and guided WinPE disk and firmware preparation to WindowsiOS. Use a prepared Windows disk for the existing guest boot path. The WinPE startup path is ready for physical-device testing. A complete on-device Windows installation remains unverified.
 See [BUILDING.md](BUILDING.md) for the manual Codemagic unsigned IPA workflow,
 [TESTING.md](TESTING.md) for physical-device verification, and
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current coverage.

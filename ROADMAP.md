@@ -8,11 +8,12 @@
 | 3. Installation | Verify media validation and persistent disk preparation on-device. Build and test the bootable WinPE installer disk, then validate provisioning and standard OOBE using the actual guest. |
 | 4. Stabilization | Complete the physical matrix in [TESTING.md](TESTING.md), use measured results to address bottlenecks, and document release compatibility. |
 
-## Remaining native installer work
+## Windows deployment gates
 
-1. Stream the boot files from the verified UDF ISO into a GPT installer disk. ARM64 EDK2 must be able to boot its FAT32 partition. Store install WIM files over 4 GiB on an appropriate second partition, or use a validated split-WIM flow.
-2. Attach that installer disk read-only to the engine’s existing secondary NVMe slot and boot Windows PE. Define a deterministic device and partition identity protocol so provisioning targets the intended VM disk.
-3. Partition the target, use DISM to apply the selected 26100 ARM64 edition, inject signed ARM64 drivers, and use BCDBOOT to establish the EFI path. Store durable stage markers and verify them before restarting or reporting progress.
-4. Validate the NVMe, firmware, Secure Boot and TPM requirements against standard Windows 11 setup. Boot the installed disk and allow Windows to handle account setup and activation.
+1. Build and sign the app for a real iPad. Boot a prepared Windows 11 24H2 image with Compatibility before testing Setup or larger caches.
+2. Build the GPT installer from legitimate 26100 media. Verify that ARM64 EDK2 boots its FAT32 partition and that WinPE locates the exFAT payload. Test the native launcher with a WIM and supported ESD media.
+3. Verify standard Windows Setup with compatible Secure Boot firmware and TPM 2.0. The current board lacks TPM 2.0 and the app keeps Setup's normal hardware requirements.
+4. Confirm Setup applies the chosen edition, creates EFI boot files and accepts the signed ARM64 NetKVM package. Boot the primary disk and complete standard Windows account setup and activation.
+5. Add verified guest checkpoints and unattended DISM/BCDBOOT only after the stock Setup path is confirmed. Resume safely from a partially written primary disk and clean up the temporary installer while keeping the original ISO.
 
-The implemented media layer rejects other builds. The wizard currently creates the sparse disk and copies EDK2 firmware and variables from Files. It saves a recoverable preparation stage. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current gates.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the locally verified portions.

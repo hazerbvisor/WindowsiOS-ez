@@ -204,3 +204,5 @@ The following proprietary operating system and application packages are **never*
 The self-task entitlement diagnostics follow the approach in Henge's [Entitlements.swift](https://github.com/Leviidev/Henge/blob/7b557301195f130f900b1b4cd105c9ecf0fbc109/ios/Henge/Entitlements.swift), under the Henge project's GPL-2.0-or-later license.
 
 WindowsiOS-ez links [VideoLAN libudfread](https://www.videolan.org/developers/libudfread.html) 1.2.0 to inspect UDF installation media. The library is copyright VLC authors and VideoLAN and is licensed under LGPL-2.1-or-later. The iOS build fetches the unmodified, checksum-pinned [release source and license](https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz).
+
+WindowsiOS-ez uses the [wimlib](https://wimlib.net/) 1.14.5 library to add startup files to a local WinPE copy. The device build omits NTFS-3G, FUSE and the desktop tools and uses the library's LGPL-2.1-or-later option. It uses ChaN's [FatFs R0.16](https://elm-chan.org/fsw/ff/) for FAT32 and exFAT, under the permissive license in the source archive. Both releases are fetched from their publishers and checksum-pinned.
