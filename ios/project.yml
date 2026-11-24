@@ -32,8 +32,8 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        UIStatusBarHidden: true
-        UIViewControllerBasedStatusBarAppearance: false
+        UIStatusBarHidden: false
+        UIViewControllerBasedStatusBarAppearance: true
         NSMicrophoneUsageDescription: "Windows 11 and Antigravity use your device microphone for live voice input and audio capture."
         UIBackgroundModes:
           - audio
@@ -78,6 +78,7 @@ targets:
           - -lintl
           - -lpcre2-8
           - -lffi
+          - -ludfread
           - -lresolv
           - -liconv
     dependencies:

@@ -14,6 +14,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) BOOL isJITLive;
 @property (nonatomic, readonly) BOOL isDebuggerAttached;
 @property (nonatomic, readonly) BOOL isVMRunning;
+@property (nonatomic, readonly) BOOL needsRelaunchToStart;
 @property (nonatomic, readonly) BOOL isUnpacking;
 @property (nonatomic, readonly) double unpackProgress;
 @property (nonatomic, readonly) NSString *jitStatusText;
@@ -22,6 +23,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) uint32_t framebufferHeight;
 @property (nonatomic, readonly) uint64_t presentedFrames;
 @property (nonatomic, readonly) uint64_t availableMemoryMB;
+@property (nonatomic, readonly) uint64_t maximumJITMiB;
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
@@ -36,7 +38,10 @@ typedef void (^WinIOSStateCallback)(void);
 
 - (BOOL)hasProvisionedMachine;
 - (BOOL)needsSparseUnpack;
-- (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer;
+- (void)prepareAndStartInDirectory:(nullable NSString *)directory
+                            ramMiB:(uint64_t)ramMiB
+                            jitMiB:(uint64_t)jitMiB
+                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:ramMiB:jitMiB:cpus:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
@@ -52,6 +57,7 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)sendEscape;
 - (void)pressPowerButton;
 - (void)flushDisks;
+- (void)captureDiagnostics;
 - (void)stopVM;
 
 @end

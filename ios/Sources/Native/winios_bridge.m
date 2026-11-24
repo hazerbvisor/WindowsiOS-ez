@@ -56,6 +56,7 @@ static NSString *processEntitlementStatus(void) {
 
 @interface WinIOSBridge () {
     BOOL _vmRunning;
+    BOOL _engineUsed;
     BOOL _unpacking;
     double _unpackProgress;
     NSString *_vmStatus;
@@ -209,8 +210,6 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)installTrapGuard {
     winios_jit_install_trap_handler();
-    [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
-    [self configureAudioSessionAndMicPermission];
     UIScreen *mainScreen = [UIScreen mainScreen];
     [self updateScreenSize:mainScreen.bounds.size scale:mainScreen.scale];
     [self notifyChanged];
@@ -267,6 +266,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (uint64_t)presentedFrames {
     return _vmRunning ? hv_winvm_display_frames() : 0;
+}
+
+- (uint64_t)maximumJITMiB {
+    return WINIOS_JIT_DEFAULT_BYTES >> 20;
 }
 
 - (uint64_t)availableMemoryMB {
@@ -348,9 +351,29 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
 }
 
-- (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer {
-    if (layer) _pendingLayer = layer;
+- (BOOL)needsRelaunchToStart {
+    return _engineUsed && !_vmRunning;
+}
+
+- (void)reportStartFailure:(NSString *)message {
+    _vmStatus = message;
+    dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+    [self notifyChanged];
+}
+
+- (void)prepareAndStartInDirectory:(nullable NSString *)directory
+                            ramMiB:(uint64_t)ramMiB
+                            jitMiB:(uint64_t)jitMiB
+                              cpus:(int)cpus {
     if (_vmRunning || _unpacking) return;
+    if (_engineUsed) {
+        [self reportStartFailure:@"Close and reopen WindowsiOS-ez before starting another session."];
+        return;
+    }
+    if (jitMiB == 0 || jitMiB > self.maximumJITMiB || cpus < 1 || cpus > HV_MAX_CPUS) {
+        [self reportStartFailure:@"This build supports up to 384 MiB of JIT cache and four vCPUs. Choose Compatibility or change the hardware settings."];
+        return;
+    }
 
     if (!self.isJITLive) {
         [self tryAcquireJIT:YES];
@@ -362,22 +385,23 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         }
     }
 
-    if (![self hasProvisionedMachine]) {
-        _vmStatus = @"Place code.fd, vars.fd, and windows11.hvsparse in Documents/Machines/Win11";
-        dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
-        [self notifyChanged];
+    NSString *dir = directory ?: [self machineDirectory];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL hasRaw = [self hasRawDiskImageAt:dir];
+    NSString *src = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
+    if (![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"code.fd"]] ||
+        ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"vars.fd"]] ||
+        (!hasRaw && ![fm fileExistsAtPath:src])) {
+        [self reportStartFailure:@"This machine needs UEFI firmware, writable NVRAM and a prepared Windows disk."];
         return;
     }
-
-    NSString *dir = [self machineDirectory];
-    if (![self hasRawDiskImageAt:dir] && [self needsSparseUnpack]) {
+    if (!hasRaw) {
         _unpacking = YES;
         _unpackProgress = 0.0;
         _vmStatus = @"Unpacking Windows 11 NVMe image (0%)...";
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
 
-        NSString *src = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
         NSString *dst = [dir stringByAppendingPathComponent:@"windows11.img"];
 
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -388,7 +412,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                 self->_unpacking = NO;
                 if (rc == 0) {
                     self->_unpackProgress = 1.0;
-                    [self startConfiguredVMInDirectory:dir];
+                    [self startConfiguredVMInDirectory:dir ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
                 } else {
                     self->_vmStatus = @"Could not import the sparse disk. Check the archive, free space and whether windows11.img already exists.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -399,12 +423,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    [self startConfiguredVMInDirectory:dir];
+    [self startConfiguredVMInDirectory:dir ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
 }
 
-- (void)startConfiguredVMInDirectory:(NSString *)dir {
-    if (_vmRunning) return;
-    [self configureAudioSessionAndMicPermission];
+- (void)startConfiguredVMInDirectory:(NSString *)dir ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus {
+    if (_vmRunning || _engineUsed) return;
 
     WinIosDualMapping jit = winios_jit_mapping();
     if (!jit.rx_addr || !jit.rw_addr) {
@@ -413,13 +436,23 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_guest_ram.bin"];
-    setenv("HV_RAM_FILE", ramBacking.fileSystemRepresentation, 1);
-
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
     uint64_t ramMB = 3072;
-    if (preallocRam && preallocBytes >= (1024ull << 20)) {
+    if (ramMiB != 0) {
+        uint64_t physicalMiB = NSProcessInfo.processInfo.physicalMemory >> 20;
+        uint64_t availableMiB = [self availableMemoryMB];
+        BOOL fitsPreallocation = preallocRam && ramMiB <= (preallocBytes >> 20);
+        BOOL fitsProcessBudget = availableMiB > 768 && ramMiB <= availableMiB - 768;
+        if (ramMiB < 4096 || ramMiB >= physicalMiB || (!fitsPreallocation && !fitsProcessBudget)) {
+            [self reportStartFailure:[NSString stringWithFormat:
+                @"Cannot safely start with %llu MiB of guest RAM. The process reports %llu MiB available. Edit the configuration and choose Automatic to use the existing device-based fallback.",
+                ramMiB, availableMiB]];
+            return;
+        }
+        ramMB = ramMiB;
+        if (!fitsPreallocation) preallocRam = NULL;
+    } else if (preallocRam && preallocBytes >= (1024ull << 20)) {
         ramMB = preallocBytes >> 20;
     } else {
         uint64_t availMB = [self availableMemoryMB];
@@ -428,6 +461,16 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         else if (availMB < 3400 && availMB > 1800) ramMB = (availMB - 768) & ~127ull;
         else if (availMB <= 1800) ramMB = 2048;
     }
+
+    if ((jit.size >> 20) < jitMiB) {
+        [self reportStartFailure:@"The active JIT mapping is smaller than the selected cache."];
+        return;
+    }
+
+    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_guest_ram.bin"];
+    if (ramMiB == 0) setenv("HV_RAM_FILE", ramBacking.fileSystemRepresentation, 1);
+    else unsetenv("HV_RAM_FILE");
+    [self configureAudioSessionAndMicPermission];
 
     NSString *sharedDir = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
     [[NSFileManager defaultManager] createDirectoryAtPath:sharedDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -441,7 +484,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSString *diskPath = [dir stringByAppendingPathComponent:@"windows11.img"];
 
     _configuredRamMB = ramMB;
-    _configuredCPUs = 4;
+    _configuredCPUs = cpus;
 
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
@@ -452,7 +495,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         .share_sock = shareSock.fileSystemRepresentation,
         .ncpus = _configuredCPUs,
         .ram_mb = _configuredRamMB,
-        .jit_bytes = jit.size,
+        .jit_bytes = (size_t)jitMiB << 20,
         .jit_rx = jit.rx_addr,
         .jit_rw = jit.rw_addr,
         .prealloc_ram = preallocRam,
@@ -463,8 +506,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     };
 
     char err[256] = {0};
+    _engineUsed = YES;
     if (hv_winvm_create(&cfg, err, sizeof err) != 0) {
-        _vmStatus = [NSString stringWithFormat:@"VM create failed: %s", err];
+        _vmStatus = [NSString stringWithFormat:@"VM create failed: %s Close and reopen the app before retrying. If RAM allocation failed, choose Automatic in the machine settings.", err];
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
         return;
@@ -710,6 +754,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)flushDisks {
     if (!_vmRunning) return;
     hv_winvm_flush_disks();
+}
+
+- (void)captureDiagnostics {
+    dispatch_async(_diagQueue, ^{
+        [self writeDiagnosticsSnapshot];
+        [self notifyChanged];
+    });
 }
 
 - (void)stopVM {

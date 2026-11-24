@@ -7,7 +7,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DEPS="$ROOT/ios/deps"
-LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a)
+LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a libudfread.a)
 
 ARCH=arm64
 SDK=iphoneos
@@ -29,7 +29,8 @@ KEY="$({
 cache_ready() {
     [ -f "$OUT_DEPS/build-key" ] && [ "$(cat "$OUT_DEPS/build-key")" = "$KEY" ] || return 1
     [ -s "$OUT_DEPS/include/slirp/libslirp.h" ] &&
-        [ -s "$OUT_DEPS/include/slirp/libslirp-version.h" ] || return 1
+        [ -s "$OUT_DEPS/include/slirp/libslirp-version.h" ] &&
+        [ -s "$OUT_DEPS/include/udfread/udfread.h" ] || return 1
     for lib in "${LIBS[@]}"; do
         [ -s "$OUT_DEPS/lib/$lib" ] || return 1
     done
@@ -70,6 +71,7 @@ unset PKG_CONFIG_PATH
 FFI_URL="https://github.com/libffi/libffi/releases/download/v3.5.0/libffi-3.5.0.tar.gz"
 GLIB_URL="https://download.gnome.org/sources/glib/2.83/glib-2.83.0.tar.xz"
 SLIRP_URL="https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
+UDF_URL="https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz"
 
 fetch_unpack() {
     local url="$1" checksum="$2"
@@ -92,6 +94,7 @@ fetch_unpack() {
 fetch_unpack "$FFI_URL" 8c72678628a5dd8782f08ad421d5a441e42c1c5c1b33e0bc211cbfcf1f3b3978
 fetch_unpack "$GLIB_URL" a07d9e1a57a4279c5ece71c26dc44eea12bd518ea9ff695d53e722997032b614
 fetch_unpack "$SLIRP_URL" 3970542143b7c11e6a09a4d2b50f30a133473c41f15ed0bdcc3b7a1c450d9a5c
+fetch_unpack "$UDF_URL" bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f
 
 meson_quote() { echo "'$(echo $* | sed "s/ /','/g")'"; }
 
@@ -183,6 +186,18 @@ if [ ! -f "$STAMPS/libslirp" ]; then
     touch "$STAMPS/libslirp"
 fi
 
+# 4. libudfread (read-only Windows ISO filesystem inspection)
+if [ ! -f "$STAMPS/libudfread" ]; then
+    echo "[build] libudfread-1.2.0"
+    rm -rf "$SRC/libudfread-1.2.0/_ios_build"
+    ( cd "$SRC/libudfread-1.2.0" \
+      && meson setup _ios_build --cross-file "$CROSS_IOS" --prefix="$PREFIX" \
+            --buildtype=release --default-library=static \
+      && meson compile -C _ios_build -j "$NCPU" \
+      && meson install -C _ios_build --no-rebuild ) > "$WORK_DEPS/libudfread.log" 2>&1 || show_failure "$WORK_DEPS/libudfread.log"
+    touch "$STAMPS/libudfread"
+fi
+
 # Stage only a complete set of headers and libraries.
 for lib in "${LIBS[@]}"; do
     if [ ! -s "$PREFIX/lib/$lib" ]; then
@@ -191,8 +206,8 @@ for lib in "${LIBS[@]}"; do
     fi
 done
 rm -f "$OUT_DEPS/build-key"
-rm -rf "$OUT_DEPS/include/slirp"
-cp -R "$PREFIX/include/slirp" "$OUT_DEPS/include/slirp"
+rm -rf "$OUT_DEPS/include/slirp" "$OUT_DEPS/include/udfread"
+cp -R "$PREFIX/include/slirp" "$PREFIX/include/udfread" "$OUT_DEPS/include/"
 for lib in "${LIBS[@]}"; do
     cp "$PREFIX/lib/$lib" "$OUT_DEPS/lib/$lib"
 done

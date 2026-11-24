@@ -63,6 +63,7 @@ final class VMViewModel: ObservableObject {
     @Published var isJITLive: Bool = false
     @Published var isDebuggerAttached: Bool = false
     @Published var isVMRunning: Bool = false
+    @Published var needsRelaunchToStart = false
     @Published var isUnpacking: Bool = false
     @Published var unpackProgress: Double = 0
     @Published var jitStatusText: String = "Checking JIT..."
@@ -89,7 +90,8 @@ final class VMViewModel: ObservableObject {
     @Published var activeSafariURL: IdentifiableURL? = nil
     @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
 
-    private var didAutoLaunchAttempt = false
+    private var bootDirectory: URL?
+    private var bootHardware = VMHardware()
     private var oauthPollTimer: Timer? = nil
 
     init() {
@@ -225,6 +227,7 @@ final class VMViewModel: ObservableObject {
         isJITLive = b.isJITLive
         isDebuggerAttached = b.isDebuggerAttached
         isVMRunning = b.isVMRunning
+        needsRelaunchToStart = b.needsRelaunchToStart
         isUnpacking = b.isUnpacking
         unpackProgress = b.unpackProgress
         jitStatusText = b.jitStatusText
@@ -244,35 +247,46 @@ final class VMViewModel: ObservableObject {
             _ = b.tryAcquireJIT(true)
         }
         syncFromBridge()
-        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
-            didAutoLaunchAttempt = true
-            b.prepareAndStart(with: nil)
-            syncFromBridge()
-        }
+    }
+
+    func open(directory: URL?, hardware: VMHardware) {
+        bootDirectory = directory
+        bootHardware = hardware
+        startOrRetry()
     }
 
     func startOrRetry() {
-        didAutoLaunchAttempt = true
-        WinIOSBridge.shared.prepareAndStart(with: nil)
+        WinIOSBridge.shared.start(directory: bootDirectory?.path, ramMiB: UInt64(bootHardware.ramMiB),
+                                  jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()
     }
 
     func requestStikDebugJIT() {
-        guard let bundleID = Bundle.main.bundleIdentifier else { return }
-        var urlStr = "stikjit://enable-jit?bundle-id=\(bundleID)&pid=\(getpid())"
-        if let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
-           let script = try? String(contentsOfFile: scriptPath, encoding: .utf8),
-           let data = script.data(using: .utf8) {
-            let b64 = data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-")
-                .replacingOccurrences(of: "/", with: "_")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
-            if let encoded = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                urlStr += "&script-data=\(encoded)"
-            }
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let script = Bundle.main.url(forResource: "henge-jit", withExtension: "js"),
+              let data = try? Data(contentsOf: script) else {
+            jitStatusText = "The bundled JIT debugger script could not be loaded."
+            return
         }
-        if let url = URL(string: urlStr) {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        let scriptData = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        var components = URLComponents()
+        components.scheme = "stikjit"
+        components.host = "enable-jit"
+        components.queryItems = [
+            URLQueryItem(name: "bundle-id", value: bundleID),
+            URLQueryItem(name: "pid", value: String(getpid())),
+            URLQueryItem(name: "script-data", value: scriptData),
+        ]
+        guard let url = components.url else { return }
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            if !opened {
+                Task { @MainActor [weak self] in
+                    self?.jitStatusText = "StikDebug did not open. Install and pair the authorized debugger, then try again."
+                }
+            }
         }
     }
 }

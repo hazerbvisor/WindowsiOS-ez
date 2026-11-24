@@ -3,13 +3,19 @@ import SwiftUI
 
 @main
 struct WindowsiOSApp: App {
+    @UIApplicationDelegateAdaptor(WindowsDownloadAppDelegate.self) private var downloadDelegate
     @StateObject private var viewModel = VMViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    private static let recoverStorage: Void = removeAbandonedStaging(in: VMFiles.repository.root)
+
+    init() {
+        _ = Self.recoverStorage
+    }
+
     var body: some Scene {
         WindowGroup {
-            SessionView(vm: viewModel)
-                .preferredColorScheme(.dark)
+            WindowsLibraryView(vm: viewModel)
                 .onAppear {
                     viewModel.onAppBecameActive()
                 }
