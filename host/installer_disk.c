@@ -296,7 +296,10 @@ static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, i
 }
 
 static int stage_drivers(InstallerBuild *build, const char *directory, bool copying) {
-    static const char *const names[] = {"netkvm.inf", "netkvm.cat", "netkvm.sys", "netkvmco.dll"};
+    static const char *const names[] = {
+        "netkvm.inf", "netkvm.cat", "netkvm.sys",
+        "netkvmp.exe", "netkvmco.dll", "netkvmco.exe"
+    };
     if (!directory) return 0;
     if (copying && (f_mkdir("1:/drivers") != FR_OK || f_mkdir("1:/drivers/NetKVM") != FR_OK))
         return fail(build, "The NetKVM driver folder could not be created.");
@@ -304,8 +307,8 @@ static int stage_drivers(InstallerBuild *build, const char *directory, bool copy
         char path[PATH_LENGTH];
         int length = snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
         if (length < 0 || (size_t)length >= sizeof(path)) return fail(build, "The NetKVM file path is too long.");
-        int file = open(path, O_RDONLY | O_NONBLOCK);
-        if (file < 0 && errno == ENOENT && i == 3) continue;
+        int file = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+        if (file < 0 && errno == ENOENT && i >= 3) continue;
         struct stat st;
         if (file < 0 || fstat(file, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
             (uint64_t)st.st_size > UINT32_MAX) {

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
+import hashlib
 import json
 import plistlib
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -17,8 +19,15 @@ class BuildArtifactTests(unittest.TestCase):
         self.work = Path(temporary.name)
         self.entitlements = self.work / "WindowsiOS.entitlements"
         self.entitlements.write_bytes(plistlib.dumps(verify.ENTITLEMENTS))
+        self.asset_payloads = {name: ("fixture " + name).encode() for name in json.loads(verify.ASSET_MANIFEST.read_text())}
+        manifest = self.work / "installer_assets.json"
+        manifest.write_text(json.dumps({name: hashlib.sha256(data).hexdigest()
+                                        for name, data in self.asset_payloads.items()}))
+        mocked = patch.object(verify, "ASSET_MANIFEST", manifest)
+        mocked.start()
+        self.addCleanup(mocked.stop)
 
-    def make_ipa(self, *, platform=2, signature=False, resource=True):
+    def make_ipa(self, *, platform=2, signature=False, resource=True, broken_asset=False):
         ipa = self.work / "test.ipa"
         commands = struct.pack("<6I", 0x32, 24, platform, 17 << 16, 27 << 16, 0)
         if signature:
@@ -37,6 +46,10 @@ class BuildArtifactTests(unittest.TestCase):
             bundle.writestr(verify.APP + "WindowsiOS", header + commands)
             if resource:
                 bundle.writestr(verify.APP + "henge-jit.js", "script")
+                for name, data in self.asset_payloads.items():
+                    if broken_asset and name == "edk2-arm-vars.fd":
+                        data = b"wrong firmware"
+                    bundle.writestr(verify.APP + "InstallerAssets/" + name, data)
         return ipa
 
     def test_device_payload_passes(self):
@@ -53,6 +66,10 @@ class BuildArtifactTests(unittest.TestCase):
     def test_missing_resource_is_rejected(self):
         with self.assertRaises(KeyError):
             verify.verify_ipa(self.make_ipa(resource=False))
+
+    def test_corrupted_installer_resource_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Invalid bundled installer asset: edk2-arm-vars.fd"):
+            verify.verify_ipa(self.make_ipa(broken_asset=True))
 
     def test_generated_settings_and_signing_manifest(self):
         settings = {

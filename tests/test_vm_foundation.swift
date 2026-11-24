@@ -12,7 +12,8 @@ enum VMFoundationTests {
         try mediaPublication()
         try netKVMDriverValidation()
         try setupAnswer()
-        print("8 VM foundation test groups passed")
+        try importsInboxAndPairing()
+        print("9 VM foundation test groups passed")
     }
 
     static func presetsAndInvalidInputs() throws {
@@ -114,8 +115,9 @@ enum VMFoundationTests {
         try withTemporaryDirectory { root in
             let repo = VMRepository(root: root.appendingPathComponent("Machines"))
             let store = InstallationDraftStore(root: root.appendingPathComponent("Install"))
-            let code = root.appendingPathComponent("firmware.fd")
-            let variables = root.appendingPathComponent("variables.fd")
+            let assets = InstallerAssets(root: root)
+            let code = assets.firmware.code
+            let variables = assets.firmware.variables
             try makeFirmware(isVariables: false, at: code)
             try makeFirmware(isVariables: true, at: variables)
             try rejects { try VMRepository.validateFirmware(code, isVariables: true) }
@@ -129,12 +131,25 @@ enum VMFoundationTests {
             try store.save(draft)
             let restored = try store.load()
             precondition(restored == draft)
-            let machine = try store.prepare(restored, repository: repo)
+            let firmware = try store.firmware(for: restored, assets: assets)
+            try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: variables.path)
+            let machine = try store.prepare(restored, repository: repo, firmware: firmware)
             let disk = repo.directory(for: machine).appendingPathComponent(VMRepository.rawDisk)
             let diskBytes = try regularFileSize(disk)
             precondition(diskBytes == 64 << 30)
-            let retried = try store.prepare(restored, repository: repo)
+            let retried = try store.prepare(restored, repository: repo, firmware: firmware)
             precondition(retried == machine)
+            var second = restored
+            second.machineID = UUID()
+            let secondMachine = try store.prepare(second, repository: repo, firmware: firmware)
+            try Data([1]).write(to: repo.directory(for: secondMachine).appendingPathComponent(VMRepository.nvram))
+            let firstVariables = repo.directory(for: machine).appendingPathComponent(VMRepository.nvram)
+            let unchanged = try Data(contentsOf: firstVariables)
+            let permissions = try FileManager.default.attributesOfItem(atPath: firstVariables.path)[.posixPermissions] as? NSNumber
+            precondition(permissions?.intValue == 0o600)
+            let template = try Data(contentsOf: variables)
+            precondition(unchanged == template && template.count > 1)
+            try repo.remove(secondMachine)
 
             var rename = machine
             rename.name = "Windows Work"
@@ -214,6 +229,39 @@ enum VMFoundationTests {
             try NetKVMDrivers.stage(from: folder, to: destination)
             let staged = try Data(contentsOf: destination.appendingPathComponent("netkvm.sys"))
             precondition(staged == binary)
+        }
+    }
+
+    static func importsInboxAndPairing() throws {
+        try withTemporaryDirectory { root in
+            let imports = root.appendingPathComponent("Imports")
+            let empty = try ImportInbox.scan(imports)
+            precondition(empty.isEmpty)
+            let iso = imports.appendingPathComponent("Windows.ISO")
+            try Data([7]).write(to: iso)
+            let variables = imports.appendingPathComponent("vars.fd")
+            try makeFirmware(isVariables: true, at: variables)
+            let pairing = imports.appendingPathComponent("local.mobiledevicepairing")
+            let record: [String: Any] = ["public_key": Data(count: 32), "private_key": Data(count: 32),
+                                         "identifier": "test-device"]
+            try PropertyListSerialization.data(fromPropertyList: record, format: .binary, options: 0).write(to: pairing)
+            try PairingFile.validate(pairing)
+            try rejects { try PairingFile.validate(iso) }
+            try FileManager.default.createSymbolicLink(at: imports.appendingPathComponent("linked.iso"), withDestinationURL: iso)
+            let entries = try ImportInbox.scan(imports)
+            precondition(entries.count == 3)
+            precondition(Set(entries.map(\.kind)) == [.iso, .firmware, .pairing])
+            let copy = root.appendingPathComponent("Managed.iso")
+            try ImportCopy.file(iso, to: copy)
+            try rejects { try ImportCopy.file(iso, to: copy) }
+            try Data([1, 2]).write(to: copy)
+            let original = try Data(contentsOf: iso)
+            precondition(original == Data([7]))
+        }
+        if let folder = ProcessInfo.processInfo.environment["WINDOWSIOS_INSTALLER_ASSETS"] {
+            let assets = InstallerAssets(root: URL(fileURLWithPath: folder))
+            try assets.firmware.validate()
+            try NetKVMDrivers.validate(from: assets.drivers)
         }
     }
 

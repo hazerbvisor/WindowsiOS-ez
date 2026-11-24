@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
-import UniformTypeIdentifiers
 import UIKit
 
 struct WindowsLibraryView: View {
@@ -23,6 +22,7 @@ struct WindowsLibraryView: View {
             }
             .tabItem { Label("Diagnostics", systemImage: "waveform.path.ecg") }
         }
+        .task { ImportInboxModel.shared.refresh() }
     }
 }
 
@@ -33,11 +33,11 @@ private struct MachineLibraryView: View {
     @State private var editor: VirtualMachine?
     @State private var deleteCandidate: VirtualMachine?
     @State private var installedCandidate: VirtualMachine?
-    @State private var export: VMExport?
     @State private var showSession = false
     @State private var showAssistant = false
     @State private var setupAfterAssistant: VirtualMachine?
-    @State private var showImporter = false
+    @State private var pickerRequest: DocumentPickerRequest?
+    @State private var importProgress: ImportProgress?
     @State private var busy = false
     @State private var hasLegacy = false
     @State private var error: String?
@@ -68,10 +68,24 @@ private struct MachineLibraryView: View {
                     }
                 }
                 if busy {
-                    ProgressView("Working with machine files…")
+                    if let importProgress { ImportProgressView(progress: importProgress) }
+                    else { ProgressView("Working with machine files…") }
+                }
+                if machines.isEmpty && !hasLegacy && !busy && !sessionBusy {
+                    ContentUnavailableView {
+                        Label("No virtual machines", systemImage: "desktopcomputer")
+                    } description: {
+                        Text("Prepare a new virtual disk or import a folder with a prepared Windows machine.")
+                    } actions: {
+                        Button("Create Virtual Machine") { showAssistant = true }
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
                 ForEach(machines) { machine in
                     machineRow(machine)
+                }
+                ImportInboxSection(kinds: [.machine, .disk], disabled: busy || sessionBusy) { entry in
+                    importMachine(kind: entry.kind, selection: ImportSelection(entry.url))
                 }
                 if hasLegacy {
                     Section {
@@ -86,25 +100,13 @@ private struct MachineLibraryView: View {
                     }
                 }
             }
-            .overlay {
-                if machines.isEmpty && !hasLegacy && !busy && !sessionBusy {
-                    ContentUnavailableView {
-                        Label("No virtual machines", systemImage: "desktopcomputer")
-                    } description: {
-                        Text("Prepare a new virtual disk or import a folder with a prepared Windows machine.")
-                    } actions: {
-                        Button("Create Virtual Machine") { showAssistant = true }
-                            .buttonStyle(.borderedProminent)
-                        Button("Import Folder") { showImporter = true }
-                    }
-                }
-            }
             .navigationTitle("Virtual Machines")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button("Create Virtual Machine", systemImage: "plus") { showAssistant = true }
-                        Button("Import Folder", systemImage: "folder") { showImporter = true }
+                        Button("Import Folder", systemImage: "folder") { pickerRequest = DocumentPickerRequest(kind: .machine) }
+                        Button("Import Disk Image", systemImage: "externaldrive") { pickerRequest = DocumentPickerRequest(kind: .disk) }
                     } label: {
                         Label("Add Virtual Machine", systemImage: "plus")
                     }
@@ -116,18 +118,7 @@ private struct MachineLibraryView: View {
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active { refresh() }
             }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder]) { result in
-                switch result {
-                case .success(let url):
-                    doFileWork {
-                        try VMFiles.withFileAccess(url) { url in
-                            _ = try repo.importPrepared(from: url, copyDisk: VMFiles.copyDisk)
-                        }
-                    }
-                case .failure(let failure):
-                    error = failure.localizedDescription
-                }
-            }
+            .documentPicker($pickerRequest, exported: { _ in cleanExports() }, selected: importMachine)
             .sheet(item: $editor) { machine in
                 MachineEditor(machine: machine, directory: repo.directory(for: machine)) { edited in
                     try repo.update(edited)
@@ -282,7 +273,9 @@ private struct MachineLibraryView: View {
         let iso = shelf.repository.isoURL(for: mediaID)
         let checksum = shelf.items.first { $0.id == mediaID }?.savedChecksum
         doFileWork {
-            try InstallerPreparation.build(iso: iso, output: output, expectedSHA256: checksum) { _ in }
+            let drivers = InstallerAssets.bundled.drivers
+            try NetKVMDrivers.validate(from: drivers)
+            try InstallerPreparation.build(iso: iso, output: output, expectedSHA256: checksum, drivers: drivers) { _ in }
         }
     }
 
@@ -319,11 +312,33 @@ private struct MachineLibraryView: View {
         }
     }
 
+    private func importMachine(kind: DocumentImportKind, selection: ImportSelection) {
+        let repository = repo
+        let report: @Sendable (UInt64, UInt64) -> Void = { bytes, total in
+            Task { @MainActor in
+                if busy { importProgress = ImportProgress(label: "Copying disk image", bytes: bytes, total: total) }
+            }
+        }
+        doFileWork {
+            try VMFiles.withFileAccess(selection, kind: kind) { url in
+                if kind == .disk {
+                    _ = try repository.importDisk(from: url, firmware: InstallerAssets.bundled.firmware) { input, output in
+                        try VMFiles.importDisk(from: input, to: output, progress: report)
+                    }
+                } else {
+                    _ = try repository.importPrepared(from: url) { input, output in
+                        try VMFiles.copyMachineDisk(from: input, to: output, progress: report)
+                    }
+                }
+            }
+        }
+    }
+
     private func doFileWork(_ action: @escaping @Sendable () throws -> Void) {
         guard !busy, !sessionBusy else { return }
         busy = true
         Task {
-            defer { busy = false }
+            defer { busy = false; importProgress = nil }
             do {
                 try await Task.detached(priority: .userInitiated, operation: action).value
                 refresh()
@@ -369,7 +384,7 @@ private struct MachineLibraryView: View {
                 if local {
                     localBackup = "Find the VM in Files under On My iPhone or On My iPad → WindowsiOS-ez → Local Backups → \(backupID). Its TPM state is part of the local backup."
                 } else {
-                    export = VMExport(folder: folder)
+                    pickerRequest = DocumentPickerRequest(exporting: folder)
                 }
             } catch {
                 if local { try? FileManager.default.removeItem(at: workspace) } else { cleanExports() }
@@ -381,21 +396,6 @@ private struct MachineLibraryView: View {
     private func cleanExports() {
         try? FileManager.default.removeItem(at: Self.exportDirectory)
     }
-}
-
-private struct VMExport: Identifiable {
-    let folder: URL
-    var id: URL { folder }
-}
-
-struct FolderExporter: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        UIDocumentPickerViewController(forExporting: [url], asCopy: true)
-    }
-
-    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
 }
 
 private struct MachineEditor: View {

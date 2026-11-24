@@ -54,7 +54,8 @@ struct WindowsMediaRepository: Sendable {
     }
 
     func store(source: URL, name: String, linking: Bool, id: UUID = UUID(),
-               checksum: String?, inspect: (URL) throws -> WindowsISOInspection) throws -> WindowsMedia {
+               checksum: String?, copyProgress: (@Sendable (UInt64, UInt64) -> Void)? = nil,
+               inspect: (URL) throws -> WindowsISOInspection) throws -> WindowsMedia {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         #if os(iOS)
@@ -81,7 +82,7 @@ struct WindowsMediaRepository: Sendable {
         if linking {
             try fm.linkItem(at: source, to: iso)
         } else {
-            try fm.copyItem(at: source, to: iso)
+            try ImportCopy.file(source, to: iso, progress: copyProgress)
         }
         let inspection = try inspect(iso)
         let item = WindowsMedia(id: id, name: name, bytes: bytes, images: inspection.images,

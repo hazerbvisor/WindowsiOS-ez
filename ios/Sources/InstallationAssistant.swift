@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct InstallationAssistant: View {
     enum InstallationFile { case code, variables, drivers }
@@ -15,7 +14,8 @@ struct InstallationAssistant: View {
     @State private var installerProgress: InstallerProgress?
     @State private var preparationTask: Task<VirtualMachine, Error>?
     @State private var showMedia = false
-    @State private var showFirmwarePicker = false
+    @State private var pickerRequest: DocumentPickerRequest?
+    @State private var importProgress: ImportProgress?
     @State private var fileSelection: InstallationFile = .code
     @State private var hasCode = false
     @State private var hasVars = false
@@ -29,7 +29,7 @@ struct InstallationAssistant: View {
         NavigationStack {
             Form {
                 Section {
-                    Label(draft.stage.title, systemImage: "desktopcomputer")
+                    Label(stageTitle, systemImage: "desktopcomputer")
                         .font(.headline)
                 }
                 stageContents
@@ -54,14 +54,15 @@ struct InstallationAssistant: View {
                         .disabled(!loaded || saving || (draft.stage == .media && !hasSelectedMedia))
                 }
                 ToolbarItem(placement: .bottomBar) {
-                    if draft.stage != .welcome && draft.stage.rawValue <= InstallationDraft.Stage.review.rawValue {
+                    if draft.stage == .hardware || (draft.stage == .preparing && !saving) {
                         Button("Back", systemImage: "chevron.backward") {
-                            advance(to: InstallationDraft.Stage(rawValue: draft.stage.rawValue - 1))
+                            advance(to: draft.stage == .preparing ? .hardware : .media)
                         }
                     }
                 }
             }
             .task { load() }
+            .onChange(of: shelf.items) { _, _ in selectOnlyMedia() }
             .onChange(of: draft.mediaID) { _, _ in
                 if let index = draft.editionIndex, let media = selectedMedia,
                    !media.images.contains(where: { $0.index == index }) {
@@ -81,12 +82,9 @@ struct InstallationAssistant: View {
                         } }
                 }
             }
-            .fileImporter(isPresented: $showFirmwarePicker, allowedContentTypes: fileSelection == .drivers ? [.folder] : [.data]) { result in
-                switch result {
-                case .success(let url):
-                    if fileSelection == .drivers { importDrivers(url) } else { copyFirmware(url) }
-                case .failure(let error): self.error = error.localizedDescription
-                }
+            .documentPicker($pickerRequest) { kind, selection in
+                if kind == .drivers { importDrivers(selection) }
+                else { copyFirmware(selection, file: fileSelection) }
             }
             .interactiveDismissDisabled(saving)
         }
@@ -94,25 +92,7 @@ struct InstallationAssistant: View {
 
     @ViewBuilder private var stageContents: some View {
         switch draft.stage {
-        case .welcome:
-            Text("Prepare a virtual disk and writable firmware for Windows 11 24H2 ARM64.")
-            Text("You can also import a folder containing an existing Windows installation from the library.")
-                .foregroundStyle(.secondary)
-        case .device:
-            Section("Host") {
-                LabeledContent("Physical memory", value: "\(ProcessInfo.processInfo.physicalMemory >> 20) MiB")
-                LabeledContent("Available process memory", value: "\(vm.availableMemoryMB) MiB")
-                #if targetEnvironment(simulator)
-                Text("Windows sessions require a physical ARM64 iPhone or iPad.")
-                #else
-                Text("Guest boot requires executable JIT and memory available to the signed app.")
-                #endif
-            }
-        case .jit:
-            JITStatusSection(vm: vm)
-            Text("You can prepare files while JIT is unavailable. Launching a guest requires the executable self-test.")
-                .foregroundStyle(.secondary)
-        case .media:
+        case .welcome, .device, .jit, .media:
             Section("Media") {
                 Picker("Windows ISO", selection: $draft.mediaID) {
                     Text("Choose an ISO").tag(UUID?.none)
@@ -132,10 +112,9 @@ struct InstallationAssistant: View {
                 }
                 Button("Open Downloads", systemImage: "arrow.down.circle") { showMedia = true }
             }
-        case .hardware:
+        case .hardware, .storage, .review:
             TextField("Name", text: $draft.name)
             HardwareFields(hardware: $draft.hardware)
-        case .storage:
             Section {
                 ForEach([64, 128, 256], id: \.self) { size in
                     Button {
@@ -158,34 +137,8 @@ struct InstallationAssistant: View {
             } footer: {
                 Text("64 GiB is the recommended logical capacity. The disk grows as Windows writes to it. Budget at least 32 GiB of free space for Windows and staging, plus the ISO if it is not already stored. Actual use depends on the edition and updates.")
             }
-        case .review:
-            Section("Configuration") {
-                LabeledContent("Name", value: draft.name)
-                LabeledContent("Virtual capacity", value: "\(draft.capacityGiB) GiB")
-                LabeledContent("Memory preset", value: draft.hardware.preset.title)
-                if let media = shelf.items.first(where: { $0.id == draft.mediaID }) {
-                    LabeledContent("Windows ISO", value: media.name)
-                }
-            }
-            Section("EDK2 firmware") {
-                Button(hasCode ? "Replace code.fd" : "Choose code.fd", systemImage: hasCode ? "checkmark.circle" : "doc") {
-                    choose(.code)
-                }
-                Button(hasVars ? "Replace vars.fd" : "Choose vars.fd", systemImage: hasVars ? "checkmark.circle" : "doc") {
-                    choose(.variables)
-                }
-                Text("Choose compatible ARM64 ArmVirtQemu firmware and its matching variables template. Each VM gets its own writable copy.")
-                    .foregroundStyle(.secondary)
-            }
-            Section("Network driver") {
-                Button(draft.driverID == nil ? "Choose ARM64 NetKVM Folder" : "Replace NetKVM Folder", systemImage: "folder") {
-                    choose(.drivers)
-                }
-                if draft.driverID != nil {
-                    Button("Clear Driver Selection", role: .destructive) { clearDriverSelection() }
-                }
-                Text("Windows Setup checks the optional driver package’s signature. Choose the Windows 11 ARM64 folder from a trusted virtio-win release.")
-                    .foregroundStyle(.secondary)
+            Section {
+                NavigationLink("Advanced Settings") { advancedSettings }
             }
         case .preparing:
             if saving, let progress = installerProgress {
@@ -196,7 +149,7 @@ struct InstallationAssistant: View {
                 }
                 Button("Cancel Preparation", role: .cancel) { preparationTask?.cancel() }
             } else if saving {
-                ProgressView("Preparing firmware and storage…")
+                ProgressView("Preparing installation…")
             } else {
                 Text("Preparation was interrupted. Retry to finish publishing the virtual machine.")
             }
@@ -219,6 +172,54 @@ struct InstallationAssistant: View {
                 }
             }
             .disabled(vm.needsRelaunchToStart)
+            JITStatusSection(vm: vm)
+        }
+    }
+
+    private var advancedSettings: some View {
+        Form {
+            Section("EDK2 firmware") {
+                Toggle("Use custom firmware", isOn: Binding(
+                    get: { draft.useCustomFirmware == true },
+                    set: { draft.useCustomFirmware = $0 }
+                ))
+                .disabled(saving)
+                if draft.useCustomFirmware == true {
+                    Button(hasCode ? "Replace code.fd" : "Choose code.fd", systemImage: "doc") { choose(.code) }
+                        .disabled(saving)
+                    Button(hasVars ? "Replace vars.fd" : "Choose vars.fd", systemImage: "doc") { choose(.variables) }
+                        .disabled(saving)
+                }
+                Text("The default uses bundled QEMU ArmVirt firmware. Each VM receives a separate writable variable store.")
+                    .foregroundStyle(.secondary)
+            }
+            if draft.useCustomFirmware == true {
+                ImportInboxSection(kinds: [.firmware], disabled: saving) { copyFirmware(ImportSelection($0.url), file: nil) }
+            }
+            Section("Network driver") {
+                Button(draft.driverID == nil ? "Choose ARM64 NetKVM Folder" : "Replace NetKVM Folder", systemImage: "folder") {
+                    choose(.drivers)
+                }
+                .disabled(saving)
+                if draft.driverID != nil {
+                    Button("Use Bundled NetKVM") { clearDriverSelection() }
+                        .disabled(saving)
+                }
+                Text("Windows Setup checks the driver catalog and signature. The default uses the bundled Windows 11 ARM64 package.")
+                    .foregroundStyle(.secondary)
+            }
+            ImportInboxSection(kinds: [.drivers], disabled: saving) { importDrivers(ImportSelection($0.url)) }
+            if saving { ImportProgressView(progress: importProgress) }
+            if let error { Text(error).foregroundStyle(.red) }
+        }
+        .navigationTitle("Advanced Settings")
+    }
+
+    private var stageTitle: String {
+        switch draft.stage {
+        case .welcome, .device, .jit, .media: "Windows installation media"
+        case .hardware, .storage, .review: "Hardware and storage"
+        default: draft.stage.title
         }
     }
 
@@ -227,7 +228,7 @@ struct InstallationAssistant: View {
 
     private var continueLabel: String {
         switch draft.stage {
-        case .review: "Prepare"
+        case .hardware, .storage, .review: "Install"
         case .preparing: "Retry"
         case .prepared: "Done"
         default: "Continue"
@@ -239,6 +240,12 @@ struct InstallationAssistant: View {
         guard !loaded else { return }
         do {
             draft = try store.load()
+            switch draft.stage {
+            case .welcome, .device, .jit: draft.stage = .media
+            case .storage, .review: draft.stage = .hardware
+            default: break
+            }
+            selectOnlyMedia()
             removeAbandonedStaging(in: store.root)
             if draft.stage == .prepared {
                 store.cleanupFirmwareCopies()
@@ -253,9 +260,13 @@ struct InstallationAssistant: View {
         }
     }
 
+    private func selectOnlyMedia() {
+        if draft.mediaID == nil, shelf.items.count == 1 { draft.mediaID = shelf.items.first?.id }
+    }
+
     private func advance() {
         switch draft.stage {
-        case .review, .preparing:
+        case .hardware, .storage, .review, .preparing:
             prepare()
         case .prepared:
             do {
@@ -265,7 +276,7 @@ struct InstallationAssistant: View {
                 self.error = error.localizedDescription
             }
         default:
-            advance(to: InstallationDraft.Stage(rawValue: draft.stage.rawValue + 1))
+            advance(to: .hardware)
         }
     }
 
@@ -278,7 +289,7 @@ struct InstallationAssistant: View {
 
     private func choose(_ selection: InstallationFile) {
         fileSelection = selection
-        showFirmwarePicker = true
+        pickerRequest = DocumentPickerRequest(kind: selection == .drivers ? .drivers : .firmware)
     }
 
     private func updateFirmwareState() {
@@ -286,17 +297,23 @@ struct InstallationAssistant: View {
         hasVars = FileManager.default.fileExists(atPath: store.variables.path)
     }
 
-    private func copyFirmware(_ url: URL) {
+    private func copyFirmware(_ selection: ImportSelection, file: InstallationFile?) {
         let store = store
-        let destination = fileSelection == .code ? store.code : store.variables
         saving = true
         error = nil
         Task {
-            defer { saving = false }
+            defer { saving = false; importProgress = nil }
             do {
+                let report = progressReporter("Copying firmware")
                 try await Task.detached(priority: .userInitiated) {
-                    try VMFiles.withFileAccess(url) { url in
-                        try store.importFirmware(url, destination: destination)
+                    try VMFiles.withFileAccess(selection, kind: .firmware) { url in
+                        let isVariables: Bool
+                        if let file {
+                            isVariables = file == .variables
+                        } else {
+                            isVariables = (try? VMRepository.validateFirmware(url, isVariables: true)) != nil
+                        }
+                        try store.importFirmware(url, destination: isVariables ? store.variables : store.code, progress: report)
                     }
                 }.value
                 updateFirmwareState()
@@ -306,7 +323,7 @@ struct InstallationAssistant: View {
         }
     }
 
-    private func importDrivers(_ url: URL) {
+    private func importDrivers(_ selection: ImportSelection) {
         let id = UUID()
         let store = store
         let destination = store.driversURL(for: id)
@@ -314,11 +331,12 @@ struct InstallationAssistant: View {
         saving = true
         error = nil
         Task {
-            defer { saving = false }
+            defer { saving = false; importProgress = nil }
             do {
+                let report = progressReporter("Copying driver package")
                 try await Task.detached(priority: .userInitiated) {
-                    try VMFiles.withFileAccess(url) { folder in
-                        try NetKVMDrivers.stage(from: folder, to: destination)
+                    try VMFiles.withFileAccess(selection, kind: .drivers) { folder in
+                        try NetKVMDrivers.stage(from: folder, to: destination, progress: report)
                     }
                 }.value
                 var updated = draft
@@ -329,6 +347,14 @@ struct InstallationAssistant: View {
             } catch {
                 try? FileManager.default.removeItem(at: destination)
                 self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func progressReporter(_ label: String) -> @Sendable (UInt64, UInt64) -> Void {
+        { bytes, total in
+            Task { @MainActor in
+                if saving { importProgress = ImportProgress(label: label, bytes: bytes, total: total) }
             }
         }
     }
@@ -351,17 +377,16 @@ struct InstallationAssistant: View {
             error = "Wait for the current media operation to finish."
             return
         }
-        guard let media = draft.mediaID, let source = shelf.items.first(where: { $0.id == media }),
-              hasCode, hasVars else {
-            error = "Select a verified Windows ISO and both firmware files before preparing this machine."
-            if draft.stage == .preparing { draft.stage = .review }
+        guard let media = draft.mediaID, let source = selectedMedia else {
+            error = "Select a verified Windows 11 24H2 ARM64 ISO."
+            if draft.stage == .preparing { draft.stage = .media }
             return
         }
         let store = store
         let repository = repository
         let iso = shelf.repository.isoURL(for: media)
         let stageDisk = store.installerURL(for: draft, media: media)
-        let drivers = draft.driverID.map { store.driversURL(for: $0) }
+        let customDrivers = draft.driverID.map { store.driversURL(for: $0) }
         do {
             try draft.validateForPreparation()
             var preparing = draft
@@ -378,12 +403,15 @@ struct InstallationAssistant: View {
                     let input = preparing
                     let progress = $installerProgress
                     let work = Task.detached(priority: .userInitiated) {
+                        let assets = InstallerAssets.bundled
+                        let firmware = try store.firmware(for: input, assets: assets)
+                        let drivers = try store.driverDirectory(for: input, assets: assets)
                         try InstallerPreparation.build(iso: iso, output: stageDisk, expectedSHA256: source.savedChecksum,
                                                        drivers: drivers, edition: input.editionIndex) { status in
                             Task { @MainActor in progress.wrappedValue = status }
                         }
                         try Task.checkCancellation()
-                        return try store.prepare(input, repository: repository, installer: stageDisk)
+                        return try store.prepare(input, repository: repository, firmware: firmware, installer: stageDisk)
                     }
                     preparationTask = work
                     defer { preparationTask = nil }
@@ -393,10 +421,10 @@ struct InstallationAssistant: View {
                     try store.save(complete)
                     draft = complete
                     store.cleanupFirmwareCopies()
-                    if let drivers { try? FileManager.default.removeItem(at: drivers) }
+                    if let customDrivers { try? FileManager.default.removeItem(at: customDrivers) }
                     try? FileManager.default.removeItem(at: stageDisk)
                 } catch {
-                    draft.stage = .review
+                    draft.stage = .hardware
                     draft.lastError = error.localizedDescription
                 }
             }

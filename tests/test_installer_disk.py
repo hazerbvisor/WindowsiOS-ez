@@ -270,9 +270,17 @@ EFI_STATUS efi_main(void *image, void *system_table) {
         qemu = [os.environ["QEMU_AARCH64"]]
         if rom_path:
             qemu.extend(["-L", rom_path])
+        if assets := os.environ.get("WINDOWSIOS_INSTALLER_ASSETS"):
+            firmware = Path(assets)
+            variables = self.work / "vars.fd"
+            shutil.copyfile(firmware / "edk2-arm-vars.fd", variables)
+            flash = ["-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={firmware / 'edk2-aarch64-code.fd'}",
+                     "-drive", f"if=pflash,format=raw,unit=1,file={variables}"]
+        else:
+            flash = ["-bios", os.environ["EDK2_FIRMWARE"]]
         result = subprocess.run(qemu + [
             "-machine", "virt,accel=tcg", "-cpu", "cortex-a57", "-m", "512",
-            "-bios", os.environ["EDK2_FIRMWARE"],
+            *flash,
             "-drive", f"if=none,format=raw,id=setup,file={self.output},readonly=on",
             "-device", "nvme,drive=setup,serial=WIN11INST", "-nic", "none",
             "-display", "none", "-serial", "stdio", "-monitor", "none",
@@ -364,7 +372,7 @@ int main(int argc, char **argv) {
         patched = staging / "boot.wim"
         drivers = self.work / "drivers"
         drivers.mkdir()
-        for name in ("netkvm.inf", "netkvm.cat", "netkvm.sys", "netkvmco.dll"):
+        for name in ("netkvm.inf", "netkvm.cat", "netkvm.sys", "netkvmco.dll", "netkvmp.exe"):
             (drivers / name).write_bytes(("test content for " + name).encode())
         answer = self.work / "answer.xml"
         answer.write_bytes(b"<unattend>test</unattend>")
@@ -375,6 +383,7 @@ int main(int argc, char **argv) {
             disk.seek(start * 512)
             partition = disk.read((end - start + 1) * 512)
         self.assertIn(b"test content for netkvm.sys", partition)
+        self.assertIn(b"test content for netkvmp.exe", partition)
         self.assertIn(b"<unattend>test</unattend>", partition)
         target = self.work / "target.img"
         with target.open("wb") as disk:

@@ -179,6 +179,19 @@ struct VMRepository: Sendable {
         return machine
     }
 
+    func importDisk(from source: URL, firmware: VMFirmware,
+                    copy: (URL, URL) throws -> Void) throws -> VirtualMachine {
+        let name = String(source.deletingPathExtension().lastPathComponent.prefix(96))
+        let machine = VirtualMachine(name: name, installation: .preparedDisk)
+        try publish(machine) { stage in
+            try copyFirmware(code: firmware.code, variables: firmware.variables, to: stage)
+            let disk = stage.appendingPathComponent(Self.rawDisk)
+            try copy(source, disk)
+            try PreparedDisk.validate(disk)
+        }
+        return machine
+    }
+
     func duplicate(_ original: VirtualMachine, copyDisk: (URL, URL) throws -> Void) throws -> VirtualMachine {
         let machine = VirtualMachine(name: String(original.name.prefix(95)) + " Copy",
                                      hardware: original.hardware, installation: original.installation,
@@ -285,7 +298,11 @@ struct VMRepository: Sendable {
     private func copyFirmware(code: URL, variables: URL, to folder: URL) throws {
         for (source, name) in [(code, Self.firmware), (variables, Self.nvram)] {
             try Self.validateFirmware(source, isVariables: name == Self.nvram)
-            try FileManager.default.copyItem(at: source, to: folder.appendingPathComponent(name))
+            let destination = folder.appendingPathComponent(name)
+            try FileManager.default.copyItem(at: source, to: destination)
+            if name == Self.nvram {
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            }
         }
     }
 }

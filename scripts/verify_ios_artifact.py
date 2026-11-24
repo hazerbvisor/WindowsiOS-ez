@@ -3,6 +3,7 @@
 """Validate the generated device settings or an unsigned WindowsiOS-ez IPA."""
 
 import argparse
+import hashlib
 import json
 import plistlib
 import struct
@@ -13,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 BUNDLE_ID = "io.github.hazerbvisor.windowsios-ez"
 APP = "Payload/WindowsiOS.app/"
+ASSET_MANIFEST = Path(__file__).with_name("installer_assets.json")
 ENTITLEMENTS = {
     "get-task-allow": True,
     "com.apple.developer.kernel.increased-memory-limit": True,
@@ -84,6 +86,7 @@ def verify_macho(executable):
 
 
 def verify_ipa(path):
+    assets = json.loads(ASSET_MANIFEST.read_text())
     with zipfile.ZipFile(path) as ipa:
         entries = ipa.namelist()
         require(len(entries) == len(set(entries)), "IPA has duplicate entries")
@@ -106,6 +109,16 @@ def verify_ipa(path):
         require(ipa.getinfo(APP + "henge-jit.js").file_size > 0, "JIT helper script is empty")
         with ipa.open(APP + info["CFBundleExecutable"]) as executable:
             verify_macho(executable)
+        asset_prefix = APP + "InstallerAssets/"
+        bundled_assets = {entry[len(asset_prefix):] for entry in entries
+                          if entry.startswith(asset_prefix) and not entry.endswith("/")}
+        require(bundled_assets == set(assets), "Unexpected or missing installer assets")
+        for name, expected in assets.items():
+            with ipa.open(asset_prefix + name) as content:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: content.read(1 << 20), b""):
+                    digest.update(chunk)
+            require(digest.hexdigest() == expected, f"Invalid bundled installer asset: {name}")
         require(ipa.testzip() is None, "IPA contains a corrupted ZIP entry")
 
 

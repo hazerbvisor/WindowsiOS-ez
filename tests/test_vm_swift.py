@@ -25,6 +25,7 @@ class SwiftFoundationTests(unittest.TestCase):
         sources = [
             "VirtualMachine", "InstallationDraft", "WindowsImageMetadata",
             "WindowsMediaRepository", "WindowsDownload", "PreparedDisk", "NetKVMDrivers", "WindowsUnattend",
+            "ImportFiles", "InstallerAssets", "PairingFile",
         ]
         with tempfile.TemporaryDirectory() as workspace:
             binary = Path(workspace) / "test-vm-foundation"
@@ -44,7 +45,17 @@ class SwiftFoundationTests(unittest.TestCase):
             "import Foundation\n"
             "do {\n"
             "    let args = CommandLine.arguments\n"
-            "    let media = try WindowsISO.inspect(URL(fileURLWithPath: args[1]), expectedSHA256: args.count == 3 ? args[2] : nil)\n"
+            "    let source = URL(fileURLWithPath: args[1])\n"
+            "    if args.count == 5, args[3] == \"--import\" {\n"
+            "        let shelf = WindowsMediaRepository(root: URL(fileURLWithPath: args[4]))\n"
+            "        _ = try shelf.store(source: source, name: \"Large ISO\", linking: false, checksum: args[2],\n"
+            "                          copyProgress: { copied, total in print(\"copy \\(copied)/\\(total)\") }) { url in\n"
+            "            try WindowsISO.inspect(url, expectedSHA256: args[2])\n"
+            "        }\n"
+            "        print(try shelf.list()[0].bytes)\n"
+            "        exit(0)\n"
+            "    }\n"
+            "    let media = try WindowsISO.inspect(source, expectedSHA256: args.count == 3 ? args[2] : nil)\n"
             "    print(media.diagnostics)\n"
             "    print(media.computedSHA256)\n"
             "    print(media.images.map { \"\\($0.name):\\($0.architecture):\\($0.build)\" })\n"
@@ -67,7 +78,8 @@ class SwiftFoundationTests(unittest.TestCase):
             SWIFTC, "-warnings-as-errors", "-import-objc-header", bridge, "-I", ROOT / "host",
             "-o", binary, runner,
             *[f"ios/Sources/{source}.swift" for source in ("VirtualMachine", "WindowsImageMetadata", "WindowsISO",
-                                                          "WindowsMediaRepository", "WindowsDownload", "PreparedDisk")],
+                                                          "WindowsMediaRepository", "WindowsDownload", "PreparedDisk",
+                                                          "ImportFiles", "InstallerAssets")],
             *objects, UDF_LIBRARY, *([] if sys.platform == "darwin" else ["-lcrypto"]),
         ], cwd=ROOT, check=True)
         return binary
@@ -126,6 +138,34 @@ class SwiftFoundationTests(unittest.TestCase):
             result = subprocess.run([binary, GENUINE_ISO, GENUINE_SHA256], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout.decode())
             self.assertIn(b":12:26100", result.stdout)
+
+    @unittest.skipUnless(os.environ.get("WINDOWSIOS_TEST_LARGE_ISO") and GENISOIMAGE and UDF_HEADER and UDF_LIBRARY,
+                         "set WINDOWSIOS_TEST_LARGE_ISO to exercise a multi-gigabyte streaming import")
+    def test_stream_a_multigigabyte_iso_into_private_storage(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            work = Path(workspace)
+            binary = self.compile_iso_inspector(work)
+            self.make_iso_fixture(work, 0xAA64, 26100, ["-udf"])
+            source = work / "files"
+            with (source / "large.bin").open("wb") as data:
+                data.truncate(2304 << 20)
+            iso = work / "multi-gigabyte.iso"
+            with subprocess.Popen([GENISOIMAGE, "-quiet", "-udf", "-allow-limited-size", "-iso-level", "3", source],
+                                  stdout=subprocess.PIPE) as generator:
+                subprocess.run(["dd", f"of={iso}", "bs=1M", "iflag=fullblock", "conv=sparse", "status=none"],
+                               stdin=generator.stdout, check=True)
+                self.assertEqual(generator.wait(), 0)
+            self.assertGreater(iso.stat().st_size, 2 << 30)
+            with iso.open("rb") as file:
+                expected = hashlib.file_digest(file, "sha256").hexdigest()
+            store = work / "library"
+            result = subprocess.run([binary, iso, expected, "--import", store], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+            size = iso.stat().st_size
+            self.assertIn(f"copy 0/{size}".encode(), result.stdout)
+            self.assertIn(f"copy {size}/{size}".encode(), result.stdout)
+            with iso.open("rb") as file:
+                self.assertEqual(hashlib.file_digest(file, "sha256").hexdigest(), expected)
 
     def make_iso_fixture(self, work, machine, build, options):
         root = work / "files"

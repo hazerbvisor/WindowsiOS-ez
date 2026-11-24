@@ -28,6 +28,7 @@ struct InstallationDraft: Codable, Equatable {
     var mediaID: UUID?
     var editionIndex: Int?
     var driverID: UUID?
+    var useCustomFirmware: Bool?
     var lastError: String?
 
     func validateForPreparation() throws {
@@ -55,15 +56,36 @@ struct InstallationDraftStore: Sendable {
         try PropertyListEncoder().encode(draft).write(to: stateFile, options: .atomic)
     }
 
-    func importFirmware(_ source: URL, destination: URL) throws {
+    func importFirmware(_ source: URL, destination: URL,
+                        progress: (@Sendable (UInt64, UInt64) -> Void)? = nil) throws {
         try VMRepository.validateFirmware(source, isVariables: destination.lastPathComponent == VMRepository.nvram)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        // The EDK2 banks have already been limited to 64 MiB by validateFirmware.
-        try Data(contentsOf: source).write(to: destination, options: .atomic)
+        let stage = root.appendingPathComponent(".firmware-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stage) }
+        try ImportCopy.file(source, to: stage, progress: progress)
+        try VMRepository.validateFirmware(stage, isVariables: destination.lastPathComponent == VMRepository.nvram)
+        let manager = FileManager.default
+        if manager.fileExists(atPath: destination.path) {
+            _ = try manager.replaceItemAt(destination, withItemAt: stage)
+        } else {
+            try manager.moveItem(at: stage, to: destination)
+        }
+    }
+
+    func firmware(for draft: InstallationDraft, assets: InstallerAssets) throws -> VMFirmware {
+        let firmware = draft.useCustomFirmware == true ? VMFirmware(code: code, variables: variables) : assets.firmware
+        try firmware.validate()
+        return firmware
+    }
+
+    func driverDirectory(for draft: InstallationDraft, assets: InstallerAssets) throws -> URL {
+        let directory = draft.driverID.map(driversURL(for:)) ?? assets.drivers
+        try NetKVMDrivers.validate(from: directory)
+        return directory
     }
 
     func installerURL(for draft: InstallationDraft, media: UUID) -> URL {
-        let drivers = draft.driverID?.uuidString ?? "no-drivers"
+        let drivers = draft.driverID?.uuidString ?? InstallerAssets.networkDriverVersion
         let edition = draft.editionIndex.map(String.init) ?? "manual"
         return root.appendingPathComponent("Installer-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
     }
@@ -72,11 +94,12 @@ struct InstallationDraftStore: Sendable {
         root.appendingPathComponent("NetKVM-\(id.uuidString)", isDirectory: true)
     }
 
-    func prepare(_ draft: InstallationDraft, repository: VMRepository, installer: URL? = nil) throws -> VirtualMachine {
+    func prepare(_ draft: InstallationDraft, repository: VMRepository, firmware: VMFirmware,
+                 installer: URL? = nil) throws -> VirtualMachine {
         try draft.validateForPreparation()
         return try repository.createBlank(id: draft.machineID, name: draft.name, hardware: draft.hardware,
                                           capacityGiB: draft.capacityGiB, mediaID: draft.mediaID,
-                                          code: code, variables: variables, installer: installer)
+                                          code: firmware.code, variables: firmware.variables, installer: installer)
     }
 
     func cleanupFirmwareCopies() {

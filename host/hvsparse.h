@@ -17,6 +17,8 @@ int hv_sparse_unpack(const char *src, const char *dst, uint64_t minimum_size, vo
 
 /* Duplicate a raw image into a new sparse file. */
 int hv_sparse_copy_raw(const char *src, const char *dst);
+int hv_sparse_copy_raw_progress(const char *src, const char *dst,
+                                void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
 
 /* Check the archive structure without writing or allocating a disk. */
 int hv_sparse_validate(const char *src, uint64_t minimum_size);

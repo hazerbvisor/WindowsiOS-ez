@@ -2,17 +2,22 @@
 import Foundation
 
 enum NetKVMDrivers {
-    /// Copy a user-supplied ARM64 package. Windows Setup verifies the catalog and its trust chain.
-    static func stage(from source: URL, to destination: URL) throws {
+    /// Windows Setup verifies the catalog, package hashes and Windows trust chain.
+    @discardableResult
+    static func validate(from source: URL) throws -> [String: URL] {
         let fm = FileManager.default
         let required = Set(["netkvm.inf", "netkvm.cat", "netkvm.sys"])
-        let allowed = required.union(["netkvmco.dll"])
+        let helpers = ["netkvmco.dll", "netkvmco.exe", "netkvmp.exe"]
+        let allowed = required.union(helpers)
         var selected: [String: URL] = [:]
         for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
             let name = item.lastPathComponent.lowercased()
             if allowed.contains(name) {
                 guard selected[name] == nil else { throw VMError.message("The driver folder contains duplicate names.") }
-                _ = try regularFileSize(item)
+                let size = try regularFileSize(item)
+                guard size > 0, size <= 8 << 20 else {
+                    throw VMError.message("The NetKVM package contains an empty or oversized file.")
+                }
                 selected[name] = item
             }
         }
@@ -36,14 +41,34 @@ enum NetKVMDrivers {
             throw VMError.message("The NetKVM catalog does not have the expected format.")
         }
         try requireARM64PE(driver)
-        if let coInstaller = selected["netkvmco.dll"] { try requireARM64PE(coInstaller) }
+        let infLines = text.split(whereSeparator: \.isNewline).map {
+            $0.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)[0].lowercased()
+        }
+        for name in helpers {
+            if let helper = selected[name] {
+                try requireARM64PE(helper)
+            } else if infLines.contains(where: { $0.contains(name) }) {
+                throw VMError.message("The NetKVM package is missing \(name), which is required by its INF.")
+            }
+        }
+        return selected
+    }
 
+    static func stage(from source: URL, to destination: URL,
+                      progress: (@Sendable (UInt64, UInt64) -> Void)? = nil) throws {
+        let fm = FileManager.default
+        let selected = try validate(from: source)
         try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".staging-\(UUID().uuidString)")
         try fm.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: staging) }
+        let total = try selected.values.reduce(UInt64(0)) { try $0 + regularFileSize($1) }
+        var copied: UInt64 = 0
+        progress?(0, total)
         for (name, url) in selected {
-            try fm.copyItem(at: url, to: staging.appendingPathComponent(name))
+            try ImportCopy.file(url, to: staging.appendingPathComponent(name))
+            copied += try regularFileSize(url)
+            progress?(copied, total)
         }
         try fm.moveItem(at: staging, to: destination)
     }

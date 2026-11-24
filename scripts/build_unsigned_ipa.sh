@@ -17,6 +17,7 @@ if [ "$XCODE_VERSION" != "27.2" ]; then
     exit 1
 fi
 
+python3 scripts/prepare_installer_assets.py
 ./scripts/build_ios_deps.sh
 make -j"$(sysctl -n hw.ncpu)" ios-lib
 for archive in build/ios/libwinvm.a ios/deps/lib/{libslirp,libglib-2.0,libintl,libpcre2-8,libffi,libudfread,libfatfs,libwim,libtpms,libcrypto}.a; do

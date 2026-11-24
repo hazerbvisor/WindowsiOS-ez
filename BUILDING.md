@@ -10,11 +10,11 @@
 shasum -a 256 -c SHA256SUMS
 ```
 
-The pipeline syncs submodules, installs missing tools, compiles device-only static libraries with the existing native build rules, and generates the Xcode project. It checks the generated Release settings and signing manifest, builds the generic physical iOS destination, checks the linked archives, and verifies the ARM64 iOS executable, ZIP contents and JIT helper resource. The cache is keyed by dependency-script content, compiler, SDK, minimum OS and cross-build tool versions. The build artifacts contain no Windows guest or firmware. Review both the cold and warm duration during manual validation. The workflow specifies the same machine during both builds.
+The pipeline syncs submodules, installs missing tools, stages installer resources, compiles device-only static libraries and generates the Xcode project. It checks Release settings and signing entitlements, builds the physical ARM64 iOS destination, checks linked archives and validates the executable and ZIP. The bundled QEMU firmware banks, ARM64 NetKVM files and licenses are checked against SHA-256 pins. The build fetches installer inputs once per digest in the existing Codemagic cache. The IPA contains firmware and the driver package. Windows installation media are obtained separately. Review both the cold and warm duration during manual validation. The workflow specifies the same machine during both builds.
 
 ## Local build on Apple Silicon macOS
 
-Use Xcode 27.2 with the iPhoneOS SDK selected and the license accepted. Install XcodeGen, Meson, Ninja, pkgconf and Python 3. The developer toolchain also supplies Clang, Make, `libtool`, `lipo` and `vtool`.
+Use Xcode 27.2 with the iPhoneOS SDK selected and the license accepted. Install XcodeGen, Meson, Ninja, pkgconf and Python 3. The build uses Clang, Make, `libtool`, `lipo`, `vtool`, curl and the system OpenSSL command-line utility.
 
 ```sh
 HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen meson ninja pkgconf autoconf automake libtool
@@ -30,9 +30,10 @@ Native dependency versions are libffi 3.5.0, GLib 2.83.0, libslirp v4.9.1 from t
 
 The IPA requires signing before installation. Use a sideloader that supports your device and permitted entitlements. The default App ID is `io.github.hazerbvisor.windowsios-ez`. The separate manifest requests `get-task-allow`, increased memory and extended virtual addressing. Use a signing profile that authorizes the entitlements needed for the test, and verify the signed result. A profile or sideloader may omit entitlements it cannot grant. The application's runtime diagnostics distinguish signature values from available process headroom.
 
-For teams signing directly with Xcode, generate the project, then pass your signing values as build arguments. Run the dependency script and `make ios-lib` first.
+For teams signing directly with Xcode, run the dependency script and `make ios-lib` first, then stage the installer resources and generate the project.
 
 ```sh
+python3 scripts/prepare_installer_assets.py
 xcodegen generate --spec ios/project.yml
 xcodebuild -project ios/WindowsiOS.xcodeproj -scheme WindowsiOS -configuration Release \
   -sdk iphoneos -destination 'generic/platform=iOS' \

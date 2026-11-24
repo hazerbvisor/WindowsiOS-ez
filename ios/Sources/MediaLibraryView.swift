@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct MediaLibraryView: View {
     @State private var shelf = MediaShelf.shared
-    @State private var showImport = false
+    @State private var pickerRequest: DocumentPickerRequest?
     @State private var showDownloadForm = false
     @State private var checksum = ""
     @State private var removeCandidate: WindowsMedia?
-    @State private var export: ISOExport?
     @State private var discard: ISOExport?
 
     var body: some View {
         List {
             Section {
-                Button("Import Windows ISO", systemImage: "square.and.arrow.down") { showImport = true }
+                Button("Import Windows ISO", systemImage: "square.and.arrow.down") { pickerRequest = DocumentPickerRequest(kind: .iso) }
                     .disabled(shelf.busy)
                 Button("Download from a Link", systemImage: "link") { showDownloadForm = true }
                     .disabled(shelf.job != nil || shelf.restoring)
@@ -28,10 +26,13 @@ struct MediaLibraryView: View {
             } footer: {
                 Text("Choose build 26100. Microsoft’s current public download may be a newer version. If so, use a 24H2 ISO you already obtained.")
             }
+            ImportInboxSection(kinds: [.iso], disabled: shelf.busy) {
+                shelf.importISO(ImportSelection($0.url), checksum: checksum)
+            }
             if let job = shelf.job {
                 Section("Download") {
                     DownloadStatusView(shelf: shelf, job: job, checksum: checksum,
-                                       export: { export = ISOExport(url: $0) },
+                                       export: { pickerRequest = DocumentPickerRequest(exporting: $0) },
                                        discard: { discard = ISOExport(url: $0) })
                 }
             }
@@ -42,7 +43,7 @@ struct MediaLibraryView: View {
                             Button("Revalidate ISO", systemImage: "checkmark.shield") {
                                 shelf.validateRecovered(file, checksum: checksum)
                             }
-                            Button("Export ISO", systemImage: "square.and.arrow.up") { export = ISOExport(url: file) }
+                            Button("Export ISO", systemImage: "square.and.arrow.up") { pickerRequest = DocumentPickerRequest(exporting: file) }
                             Button(role: .destructive) {
                                 discard = ISOExport(url: file)
                             } label: {
@@ -57,7 +58,7 @@ struct MediaLibraryView: View {
                 }
             }
             if shelf.busy {
-                ProgressView("Checking SHA-256 and inspecting ISO…")
+                ImportProgressView(progress: shelf.importProgress)
             }
             Section("Verified media") {
                 if shelf.items.isEmpty {
@@ -114,13 +115,9 @@ struct MediaLibraryView: View {
         } message: { _ in
             Text("This removes the retained download from the app.")
         }
-        .sheet(item: $export) { FolderExporter(url: $0.url) }
         .task { shelf.open() }
-        .fileImporter(isPresented: $showImport, allowedContentTypes: [UTType(filenameExtension: "iso") ?? .data]) { result in
-            switch result {
-            case .success(let url): shelf.importISO(url, checksum: checksum)
-            case .failure(let error): shelf.error = error.localizedDescription
-            }
+        .documentPicker($pickerRequest) { _, selection in
+            shelf.importISO(selection, checksum: checksum)
         }
         .sheet(isPresented: $showDownloadForm) {
             DownloadForm(initialChecksum: checksum) { address, checksum in
@@ -249,6 +246,9 @@ private func formattedBytes(_ bytes: Int64) -> String {
 
 struct JITSettingsView: View {
     @ObservedObject var vm: VMViewModel
+    @State private var pickerRequest: DocumentPickerRequest?
+    @State private var checkingPairing = false
+    @State private var pairingStatus: String?
 
     var body: some View {
         Form {
@@ -261,8 +261,37 @@ struct JITSettingsView: View {
                     set: { if $0 != vm.useSafariForOAuth { vm.toggleOAuthBrowserMode() } }
                 ))
             }
+            Section("Pairing files") {
+                Button("Check Pairing File", systemImage: "doc.badge.gearshape") {
+                    pickerRequest = DocumentPickerRequest(kind: .pairing)
+                }
+                .disabled(checkingPairing)
+                if checkingPairing { ProgressView("Reading pairing file…") }
+                if let pairingStatus { Text(pairingStatus).foregroundStyle(.secondary) }
+            }
+            ImportInboxSection(kinds: [.pairing], disabled: checkingPairing) { checkPairing(ImportSelection($0.url)) }
         }
         .navigationTitle("Settings")
+        .documentPicker($pickerRequest) { _, selection in checkPairing(selection) }
+    }
+
+    private func checkPairing(_ selection: ImportSelection) {
+        guard !checkingPairing else { return }
+        checkingPairing = true
+        pairingStatus = nil
+        Task {
+            defer { checkingPairing = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try VMFiles.withFileAccess(selection, kind: .pairing, perform: PairingFile.validate)
+                }.value
+                pairingStatus = "Pairing file format verified. Use the original file in your authorized debugger to pair."
+            } catch let error as VMError {
+                pairingStatus = error.localizedDescription
+            } catch {
+                pairingStatus = "Could not read the pairing file. Check that it is available in Files."
+            }
+        }
     }
 }
 
@@ -296,6 +325,17 @@ struct DiagnosticsView: View {
                 LabeledContent("iOS / iPadOS", value: UIDevice.current.systemVersion)
                 LabeledContent("Physical memory", value: "\(ProcessInfo.processInfo.physicalMemory >> 20) MiB")
                 LabeledContent("Estimated process headroom", value: "\(vm.availableMemoryMB) MiB")
+            }
+            Section("Document import") {
+                let events = ImportDiagnostics.shared.events
+                if let event = events.last {
+                    Text(event).font(.caption).textSelection(.enabled)
+                    ShareLink(item: events.joined(separator: "\n")) {
+                        Label("Export Picker Diagnostics", systemImage: "square.and.arrow.up")
+                    }
+                } else {
+                    Text("No picker events in this session.").foregroundStyle(.secondary)
+                }
             }
             Section("Engine") {
                 Text(vm.vmStatusText)

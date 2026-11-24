@@ -20,6 +20,7 @@ final class MediaShelf {
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
     private(set) var busy = false
+    private(set) var importProgress: ImportProgress?
     private(set) var restoring = true
     private(set) var writtenBytes: Int64 = 0
     private(set) var expectedBytes: Int64 = 0
@@ -59,25 +60,41 @@ final class MediaShelf {
         }
     }
 
-    func importISO(_ source: URL, checksum: String?) {
+    func importISO(_ selection: ImportSelection, checksum: String?) {
         guard !busy else { return }
         busy = true
+        error = nil
         let repository = repository
+        let name = selection.url.deletingPathExtension().lastPathComponent
         Task {
-            defer { busy = false }
+            defer {
+                busy = false
+                importProgress = nil
+            }
             do {
                 let checksum = try WindowsDownload.normalizedChecksum(checksum)
+                let copyProgress = progressReporter("Copying ISO")
+                let hashProgress = progressReporter("Checking ISO SHA-256")
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try VMFiles.withFileAccess(source) { source in
-                        try repository.store(source: source, name: source.deletingPathExtension().lastPathComponent,
-                                             linking: false, checksum: checksum) { file in
-                            try WindowsISO.inspect(file, expectedSHA256: checksum)
+                    try VMFiles.withFileAccess(selection, kind: .iso) { source in
+                        try repository.store(source: source, name: name, linking: false,
+                                             checksum: checksum, copyProgress: copyProgress) { file in
+                            try WindowsISO.inspect(file, expectedSHA256: checksum, progress: hashProgress)
                         }
                     }
                 }.value
                 try refresh()
             } catch {
                 self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func progressReporter(_ label: String) -> @Sendable (UInt64, UInt64) -> Void {
+        { bytes, total in
+            Task { @MainActor in
+                guard self.busy else { return }
+                self.importProgress = ImportProgress(label: label, bytes: bytes, total: total)
             }
         }
     }

@@ -102,8 +102,13 @@ int hv_sparse_pack_progress(const char *src, const char *dst, void (*progress)(u
     return copy_raw_runs(src, dst, true, progress, opaque);
 }
 
+int hv_sparse_copy_raw_progress(const char *src, const char *dst,
+                                void (*progress)(uint64_t, uint64_t, void *), void *opaque) {
+    return copy_raw_runs(src, dst, false, progress, opaque);
+}
+
 int hv_sparse_copy_raw(const char *src, const char *dst) {
-    return copy_raw_runs(src, dst, false, NULL, NULL);
+    return hv_sparse_copy_raw_progress(src, dst, NULL, NULL);
 }
 
 int hv_sparse_pack(const char *src, const char *dst) { return hv_sparse_pack_progress(src, dst, NULL, NULL); }
