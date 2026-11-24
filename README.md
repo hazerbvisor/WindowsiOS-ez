@@ -2,7 +2,7 @@
 
 # WindowsiOS-ez
 
-WindowsiOS-ez is a WindowsiOS fork targeting a standalone iOS installation experience.
+WindowsiOS-ez adds a native VM library, a Windows 11 24H2 ARM64 media manager, and guided disk and firmware preparation to WindowsiOS. Use a prepared Windows disk for the existing guest boot path. On-device WinPE installation remains in development.
 See [BUILDING.md](BUILDING.md) for the manual Codemagic unsigned IPA workflow,
 [TESTING.md](TESTING.md) for physical-device verification, and
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current coverage.

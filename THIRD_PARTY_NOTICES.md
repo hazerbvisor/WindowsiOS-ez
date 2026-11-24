@@ -202,3 +202,5 @@ The following proprietary operating system and application packages are **never*
 ## WindowsiOS-ez reference review
 
 The self-task entitlement diagnostics follow the approach in Henge's [Entitlements.swift](https://github.com/Leviidev/Henge/blob/7b557301195f130f900b1b4cd105c9ecf0fbc109/ios/Henge/Entitlements.swift), under the Henge project's GPL-2.0-or-later license.
+
+WindowsiOS-ez links [VideoLAN libudfread](https://www.videolan.org/developers/libudfread.html) 1.2.0 to inspect UDF installation media. The library is copyright VLC authors and VideoLAN and is licensed under LGPL-2.1-or-later. The iOS build fetches the unmodified, checksum-pinned [release source and license](https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz).

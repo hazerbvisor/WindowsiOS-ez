@@ -11,7 +11,7 @@ python3 -m py_compile scripts/*.py
 git diff --check
 ```
 
-The Python suite compiles the C sparse CLI with strict warnings, exercises a 64 GiB image round trip, tests malformed records, races two concurrent imports and verifies an existing disk is preserved. It also checks unsigned IPA and generated-setting validation against synthetic fixtures. On Apple Silicon macOS run `make test-core` and `./scripts/build_unsigned_ipa.sh` as separate checks.
+The Python suite compiles the C sparse CLI with strict warnings, exercises a 64 GiB image round trip and sparse copy, tests malformed records, races two concurrent imports and verifies an existing disk is preserved. It also checks unsigned IPA and generated-setting validation against synthetic fixtures. On Apple Silicon macOS run `make test-core` and `./scripts/build_unsigned_ipa.sh` as separate checks.
 
 ## Physical-device baseline
 
@@ -20,7 +20,7 @@ Use a physical iPad Air M4 on iPadOS 27.0.1 and record the actual model, detecte
 1. Verify the Codemagic checksums, sign the IPA, confirm the signed entitlements and install it with the device's sideloading workflow. Enable Developer Mode where required. Check that the signed app launches.
 2. In Files, stage your lawfully prepared Windows disk and its matching EDK2 `code.fd` and `vars.fd` under the app's `Machines/Win11` folder. Use `windows11.hvsparse` or `windows11.img`. Keep a backup of the disk and the writable variable store. For a sparse import test, use a fresh machine directory with no raw disk.
 3. Use the app's StikDebug action with an authorized debugger setup. Check that the runtime reports that its JIT self-test passed. For the upstream desktop fallback, use `xcrun devicectl list devices` on a paired Mac, copy the target CoreDevice ID and run `./scripts/launch_on_duo.sh DEVICE_ID SIGNED_BUNDLE_ID` with the guest shut down. Check the console for execution at both RX test offsets.
-4. Launch the prepared VM and verify the desktop and Windows build using Win+R then `winver`. Shut Windows down from the guest and relaunch the app. Confirm the firmware and guest edits persisted.
+4. Select the prepared VM in the library, launch it and verify the desktop and Windows build using Win+R then `winver`. Shut Windows down from the guest and relaunch the app. Confirm the firmware and guest edits persisted.
 5. Verify portrait and landscape display, touch and physical keyboard input, trackpad or mouse, audio output and mic permission, networking, guest file sharing and the guest-to-Safari OAuth path. The framebuffer test checks presentation.
 6. Export `boot_status.txt` through Files after checking it for details you wish to redact. Record physical RAM, process headroom, virtual and resident size, physical footprint, memory warnings, actual guest RAM and JIT capacity. Share screenshots of the guest only after checking for personal content. Keep pairing records and signing credentials local.
 7. Test sparse import with a broken archive and with a valid raw disk already present. Verify the archive stays in place and the existing disk remains unchanged. Collect file logical size and allocated size separately.
@@ -28,3 +28,16 @@ Use a physical iPad Air M4 on iPadOS 27.0.1 and record the actual model, detecte
 Once the larger configurations and installer are implemented, test each preset in order, exercise sustained guest load and JIT flushes, and record allocator rejection and fallback behavior. Test provisioning with an interruption at each stage, including during download, disk preparation, DISM, EFI setup and the first guest boot. Record the last completed stage and resulting disk state.
 
 Report status separately as implemented, static validation passed, compilation passed, simulator tested, physical device tested or unverified. A locally validated archive fixture establishes verifier behavior. An actual device build and a device run establish the corresponding binary and runtime results.
+
+## Library, media and preparation checks
+
+The portable suite uses Swift when `swiftc` is on PATH or set through `SWIFTC`. For the optional UDF test, set `GENISOIMAGE`, `UDFREAD_HEADER` and `UDFREAD_LIBRARY` to a UDF fixture generator, the pinned libudfread source header and a host-built static libudfread archive. The ISO fixture contains synthetic headers and XML. It needs no Microsoft media.
+
+On the signed physical device, run the prepared-disk smoke test and then verify the following.
+
+1. Import a known-good machine folder in **Virtual Machines**. Verify the legacy Files path remains selectable. Rename the managed VM, edit its hardware, duplicate it, export a stopped copy to Files and reimport it. Check the copies have separate writable firmware and that declining deletion preserves them.
+2. Verify the power-button action follows Windows’ configured power policy. Shut the guest down from Windows. Reopen the app before launching another VM. Verify active disk images are protected from management operations.
+3. Try the Compatibility preset and an affordable Custom setting at or below 384 MiB. Try the Experimental preset and verify the app refuses start with a clear mapping limit message. Record device headroom, debugger self-test and allocation outcomes without extrapolating larger-cache support.
+4. Import a legitimate 26100 ARM64 ISO and verify other builds, x64 and malformed images are rejected. If an authoritative checksum is available, test the exact value and a mismatch. Test pause, backgrounding, network interruption, relaunch and resume with a server that supports byte ranges. Confirm cancellation leaves existing media available. Confirm removing an unused ISO requires confirmation and leaves the original Files import intact.
+5. Use the wizard to select the existing media and compatible firmware files. Test closing and reopening the draft before and during preparation. Confirm the app publishes one VM with independent firmware and a sparse image. Compare logical capacity with allocated bytes.
+6. Verify the prepared blank VM is marked awaiting installation. After WinPE provisioning is implemented, exercise the stalled stages listed in [ROADMAP.md](ROADMAP.md) and validate standard OOBE without bypassing guest security requirements.
