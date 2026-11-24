@@ -8,11 +8,51 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
+#include <dlfcn.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <stdatomic.h>
 #include <os/lock.h>
 #include <sys/stat.h>
 
 static WinIOSBridge *s_shared_bridge = nil;
+static const uint64_t kMinimumDiskBytes = 64ull << 20;
+
+/* Security SPI is optional on iOS. Query the running signature when available,
+ * following Henge's Entitlements.swift approach. */
+static NSString *describeEntitlement(CFTypeRef task, CFStringRef key,
+                                    CFTypeRef (*copyValue)(CFTypeRef, CFStringRef, CFErrorRef *)) {
+    CFErrorRef error = NULL;
+    CFTypeRef value = copyValue(task, key, &error);
+    NSString *status = @"absent";
+    if (error || (value && CFGetTypeID(value) != CFBooleanGetTypeID())) status = @"unknown";
+    else if (value) status = CFBooleanGetValue((CFBooleanRef)value) ? @"present" : @"disabled";
+    if (value) CFRelease(value);
+    if (error) CFRelease(error);
+    return status;
+}
+
+static NSString *processEntitlementStatus(void) {
+    static NSString *status;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        status = @"runtime_entitlements: unavailable";
+        void *security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_LOCAL);
+        if (!security) return;
+        CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(security, "SecTaskCreateFromSelf");
+        CFTypeRef (*copyValue)(CFTypeRef, CFStringRef, CFErrorRef *) = dlsym(security, "SecTaskCopyValueForEntitlement");
+        CFTypeRef task = createTask && copyValue ? createTask(NULL) : NULL;
+        if (task) {
+            status = [NSString stringWithFormat:@"get_task_allow: %@\nincreased_memory_limit: %@\nextended_virtual_addressing: %@",
+                describeEntitlement(task, CFSTR("get-task-allow"), copyValue),
+                describeEntitlement(task, CFSTR("com.apple.developer.kernel.increased-memory-limit"), copyValue),
+                describeEntitlement(task, CFSTR("com.apple.developer.kernel.extended-virtual-addressing"), copyValue)];
+            CFRelease(task);
+        }
+        dlclose(security);
+    });
+    return status;
+}
 
 @interface WinIOSBridge () {
     BOOL _vmRunning;
@@ -26,6 +66,7 @@ static WinIOSBridge *s_shared_bridge = nil;
     int _configuredCPUs;
     CAMetalLayer *__weak _pendingLayer;
     uint64_t _diagTickCount;
+    _Atomic(uint64_t) _memoryWarnings;
     uint64_t _lastMachTicks;
     uint64_t _lastWfiTicks;
     double _lastWfiIdlePct;
@@ -88,10 +129,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         BOOL safariDefault = ([ud objectForKey:@"winios.safariOAuthV2"] == nil) ? YES : [ud boolForKey:@"winios.safariOAuthV2"];
         hv_share_set_url_handler_enabled(safariDefault ? 1 : 0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
-        _diagQueue = dispatch_queue_create("me.ammaar.windowsios.diag", attr);
+        _diagQueue = dispatch_queue_create("io.github.hazerbvisor.windowsios-ez.diag", attr);
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationDidEnterBackgroundNotification object:nil];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationWillTerminateNotification object:nil];
+        [nc addObserver:self selector:@selector(onMemoryWarning:) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
         [nc addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
     }
     return self;
@@ -273,7 +315,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (BOOL)hasRawDiskImageAt:(NSString *)dir {
     NSString *raw = [dir stringByAppendingPathComponent:@"windows11.img"];
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:raw error:nil];
-    return attrs && [attrs fileSize] >= (64ull << 20);
+    return [attrs[NSFileType] isEqualToString:NSFileTypeRegular] && [attrs fileSize] >= kMinimumDiskBytes;
 }
 
 - (BOOL)needsSparseUnpack {
@@ -328,7 +370,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
 
     NSString *dir = [self machineDirectory];
-    if ([self needsSparseUnpack]) {
+    if (![self hasRawDiskImageAt:dir] && [self needsSparseUnpack]) {
         _unpacking = YES;
         _unpackProgress = 0.0;
         _vmStatus = @"Unpacking Windows 11 NVMe image (0%)...";
@@ -337,24 +379,18 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
         NSString *src = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
         NSString *dst = [dir stringByAppendingPathComponent:@"windows11.img"];
-        NSString *tmpDst = [dir stringByAppendingPathComponent:@"windows11.img.unpacking"];
 
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            unlink(tmpDst.fileSystemRepresentation);
-            unlink(dst.fileSystemRepresentation);
             UnpackCtx ctx = {.bridge = self, .lastUpdate = 0};
-            int rc = hv_sparse_unpack(src.fileSystemRepresentation, tmpDst.fileSystemRepresentation, unpack_progress_cb, &ctx);
+            int rc = hv_sparse_unpack(src.fileSystemRepresentation, dst.fileSystemRepresentation, kMinimumDiskBytes,
+                                      unpack_progress_cb, &ctx);
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_unpacking = NO;
                 if (rc == 0) {
-                    unlink(dst.fileSystemRepresentation);
-                    rename(tmpDst.fileSystemRepresentation, dst.fileSystemRepresentation);
-                    unlink(src.fileSystemRepresentation);
                     self->_unpackProgress = 1.0;
                     [self startConfiguredVMInDirectory:dir];
                 } else {
-                    unlink(tmpDst.fileSystemRepresentation);
-                    self->_vmStatus = @"Error: failed to unpack windows11.hvsparse";
+                    self->_vmStatus = @"Could not import the sparse disk. Check the archive, free space and whether windows11.img already exists.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
                     [self notifyChanged];
                 }
@@ -499,6 +535,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     [self notifyChanged];
 }
 
+- (void)onMemoryWarning:(NSNotification *)notification {
+    (void)notification;
+    atomic_fetch_add_explicit(&_memoryWarnings, 1, memory_order_relaxed);
+    dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+}
+
 - (void)writeDiagnosticsSnapshot {
     NSString *docs = [self documentsPath];
     NSString *statusFile = [docs stringByAppendingPathComponent:@"boot_status.txt"];
@@ -534,6 +576,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     double hingeDeg = _hingeAngleDegrees;
     os_unfair_lock_unlock(&_metricsLock);
 
+    task_vm_info_data_t memory = {0};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t result = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&memory, &count);
+    NSString *processMemory = result == KERN_SUCCESS && count >= TASK_VM_INFO_REV1_COUNT
+        ? [NSString stringWithFormat:@"virtual_mem_mb: %llu\nresident_mem_mb: %llu\nphys_footprint_mb: %llu",
+           (unsigned long long)(memory.virtual_size >> 20), (unsigned long long)(memory.resident_size >> 20),
+           (unsigned long long)(memory.phys_footprint >> 20)]
+        : @"process_memory: unavailable";
     NSString *txt = [NSString stringWithFormat:
         @"vm_running: %@\n"
         @"vm_status: %@\n"
@@ -543,6 +593,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"cpus: %d\n"
         @"ram_mb: %llu\n"
         @"avail_mem_mb: %llu\n"
+        @"physical_mem_mb: %llu\n"
+        @"memory_warning_count: %llu\n"
+        @"%@\n"
+        @"%@\n"
         @"jit_used_mb: %.1f\n"
         @"jit_cap_mb: %.0f\n"
         @"jit_full_flushes: %llu\n"
@@ -565,6 +619,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _configuredCPUs,
         _configuredRamMB,
         [self availableMemoryMB],
+        (unsigned long long)(NSProcessInfo.processInfo.physicalMemory >> 20),
+        (unsigned long long)atomic_load_explicit(&_memoryWarnings, memory_order_relaxed),
+        processMemory,
+        processEntitlementStatus(),
         (double)jitUsedBytes / (1024.0 * 1024.0),
         (double)jitCapBytes / (1024.0 * 1024.0),
         jitFullFlushes,

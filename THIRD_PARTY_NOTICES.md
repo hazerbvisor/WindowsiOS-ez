@@ -198,3 +198,7 @@ The following proprietary operating system and application packages are **never*
 
 - **Microsoft Windows 11 24H2 ARM64** (`Build 26100`) — Property of Microsoft Corporation, governed by the Microsoft Software License Terms. Users supply their own official Microsoft retail ARM64 ESD/ISO (`work/downloads/Win11_24H2_ARM64_en-us.esd`).
 - **Google Antigravity (`2.31.0` Windows ARM64)** — Property of Google LLC, governed by its respective terms of service.
+
+## WindowsiOS-ez reference review
+
+The self-task entitlement diagnostics follow the approach in Henge's [Entitlements.swift](https://github.com/Leviidev/Henge/blob/7b557301195f130f900b1b4cd105c9ecf0fbc109/ios/Henge/Entitlements.swift), under the Henge project's GPL-2.0-or-later license.

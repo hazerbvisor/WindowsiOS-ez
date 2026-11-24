@@ -13,6 +13,6 @@ int hv_sparse_pack(const char *src, const char *dst);
 /* The same; progress(position, size, opaque) may be NULL. */
 int hv_sparse_pack_progress(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
 /* Both: unpack into a sparse file. progress(done, total, opaque) may be NULL. Returns 0 or -1. */
-int hv_sparse_unpack(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
+int hv_sparse_unpack(const char *src, const char *dst, uint64_t minimum_size, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
 
 #endif
