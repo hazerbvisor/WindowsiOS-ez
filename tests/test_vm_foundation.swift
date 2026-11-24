@@ -10,7 +10,8 @@ enum VMFoundationTests {
         try preparedDiskValidation()
         try machinePreparationAndRecovery()
         try mediaPublication()
-        print("6 VM foundation test groups passed")
+        try netKVMDriverValidation()
+        print("7 VM foundation test groups passed")
     }
 
     static func presetsAndInvalidInputs() throws {
@@ -183,6 +184,31 @@ enum VMFoundationTests {
             try media.remove(first)
             let removed = try media.list()
             precondition(removed.isEmpty && FileManager.default.fileExists(atPath: source.path))
+        }
+    }
+
+    static func netKVMDriverValidation() throws {
+        try withTemporaryDirectory { root in
+            let folder = root.appendingPathComponent("User driver")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try Data("CatalogFile=netkvm.cat\n[NetKVM.NTarm64]".utf8)
+                .write(to: folder.appendingPathComponent("NetKVM.INF"))
+            try Data([0x30, 0]).write(to: folder.appendingPathComponent("netkvm.cat"))
+            var binary = Data(count: 70)
+            binary[0] = 0x4d
+            binary[1] = 0x5a
+            binary[60] = 64
+            binary.replaceSubrange(64..<70, with: [0x50, 0x45, 0, 0, 0x64, 0x86])
+            let sys = folder.appendingPathComponent("netkvm.sys")
+            try binary.write(to: sys)
+            let destination = root.appendingPathComponent("Selected")
+            try rejects { try NetKVMDrivers.stage(from: folder, to: destination) }
+            precondition(!FileManager.default.fileExists(atPath: destination.path))
+            binary[69] = 0xaa
+            try binary.write(to: sys)
+            try NetKVMDrivers.stage(from: folder, to: destination)
+            let staged = try Data(contentsOf: destination.appendingPathComponent("netkvm.sys"))
+            precondition(staged == binary)
         }
     }
 

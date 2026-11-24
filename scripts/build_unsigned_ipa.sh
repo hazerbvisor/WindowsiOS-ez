@@ -19,7 +19,7 @@ fi
 
 ./scripts/build_ios_deps.sh
 make -j"$(sysctl -n hw.ncpu)" ios-lib
-for archive in build/ios/libwinvm.a ios/deps/lib/{libslirp,libglib-2.0,libintl,libpcre2-8,libffi,libudfread}.a; do
+for archive in build/ios/libwinvm.a ios/deps/lib/{libslirp,libglib-2.0,libintl,libpcre2-8,libffi,libudfread,libfatfs,libwim}.a; do
     test "$(xcrun lipo -archs "$archive")" = arm64
 done
 
@@ -46,7 +46,7 @@ if codesign -d "$APP" >/dev/null 2>&1; then
     echo "Unexpected signature on app." >&2
     exit 1
 fi
-for archive in libwinvm.a libslirp.a libglib-2.0.a libudfread.a; do
+for archive in libwinvm.a libslirp.a libglib-2.0.a libudfread.a libfatfs.a libwim.a; do
     if ! grep -Fq "/$archive(" "$STAGE/link-map.txt"; then
         echo "No linked objects from $archive found in the application link map." >&2
         exit 1

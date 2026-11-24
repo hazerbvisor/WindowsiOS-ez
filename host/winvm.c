@@ -311,8 +311,10 @@ int hv_winvm_run_cpu0(void) {
 static void *cpu0_thread(void *unused) {
     (void)unused;
     int r = hv_winvm_run_cpu0();
-    atomic_store(&stop_requested, 1);
+    int was_stopping = atomic_exchange(&stop_requested, 1);
     join_secondaries();
+    hv_winvm_flush_disks();
+    if (!was_stopping) hv_audio_shutdown();
     if (exit_cb) exit_cb(r);
     return NULL;
 }

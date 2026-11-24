@@ -32,6 +32,7 @@ private struct MachineLibraryView: View {
     @State private var activeMachine: VirtualMachine?
     @State private var editor: VirtualMachine?
     @State private var deleteCandidate: VirtualMachine?
+    @State private var installedCandidate: VirtualMachine?
     @State private var export: VMExport?
     @State private var showSession = false
     @State private var showAssistant = false
@@ -160,6 +161,18 @@ private struct MachineLibraryView: View {
             } message: { machine in
                 Text("This permanently deletes the managed disk and firmware state for \(machine.name).")
             }
+            .confirmationDialog("Use the installed Windows disk?", isPresented: installedPresented, presenting: installedCandidate) { machine in
+                Button("Use Installed Disk and Remove Setup Disk") {
+                    installedCandidate = nil
+                    adoptInstalledDisk(machine, removeInstaller: true)
+                }
+                Button("Use Installed Disk and Keep Setup Disk") {
+                    installedCandidate = nil
+                    adoptInstalledDisk(machine, removeInstaller: false)
+                }
+            } message: { _ in
+                Text("Continue after Windows Setup has finished and the guest has shut down. The primary disk is checked for ARM64 Windows boot files before switching.")
+            }
             .alert("Virtual Machine Files", isPresented: errorPresented) {
                 Button("OK", role: .cancel) { error = nil }
             } message: {
@@ -174,16 +187,23 @@ private struct MachineLibraryView: View {
         Binding(get: { deleteCandidate != nil }, set: { if !$0 { deleteCandidate = nil } })
     }
 
+    private var installedPresented: Binding<Bool> {
+        Binding(get: { installedCandidate != nil }, set: { if !$0 { installedCandidate = nil } })
+    }
+
     private var errorPresented: Binding<Bool> {
         Binding(get: { error != nil }, set: { if !$0 { error = nil } })
     }
 
     private func machineRow(_ machine: VirtualMachine) -> some View {
-        HStack {
+        let installer = repo.directory(for: machine).appendingPathComponent(VMRepository.installerDisk)
+        let hasInstaller = FileManager.default.fileExists(atPath: installer.path)
+        return HStack {
             Label {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(machine.name).font(.headline)
-                    Text(machine.installation == .blankDisk ? "Awaiting Windows installation" : "Prepared Windows disk")
+                    Text(machine.installation == .preparedDisk ? "Prepared Windows disk"
+                         : hasInstaller ? "Windows Setup disk ready" : "Awaiting Windows installation")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
             } icon: {
@@ -191,8 +211,22 @@ private struct MachineLibraryView: View {
             }
             Spacer()
             Menu {
-                Button("Start", systemImage: "play") { start(machine) }
-                    .disabled(machine.installation != .preparedDisk || sessionBusy || vm.needsRelaunchToStart)
+                if machine.installation == .preparedDisk {
+                    Button("Start", systemImage: "play") { start(machine) }
+                        .disabled(sessionBusy || vm.needsRelaunchToStart)
+                } else {
+                    if hasInstaller {
+                        Button("Start Windows Setup", systemImage: "play") { start(machine, installer: installer) }
+                            .disabled(sessionBusy || vm.needsRelaunchToStart)
+                    } else if let mediaID = machine.mediaID {
+                        Button("Build Windows Setup Disk", systemImage: "opticaldisc") {
+                            buildInstaller(for: mediaID, output: installer)
+                        }
+                        .disabled(sessionBusy)
+                    }
+                    Button("Use Installed Windows Disk", systemImage: "checkmark.circle") { installedCandidate = machine }
+                        .disabled(sessionBusy)
+                }
                 if activeMachine?.id == machine.id && vm.isVMRunning {
                     Button("Send Power Button", systemImage: "power") { WinIOSBridge.shared.pressPowerButton() }
                 }
@@ -216,11 +250,37 @@ private struct MachineLibraryView: View {
         .padding(.vertical, 5)
     }
 
-    private func start(_ machine: VirtualMachine?) {
+    private func start(_ machine: VirtualMachine?, installer: URL? = nil) {
         guard !sessionBusy, !busy, !vm.needsRelaunchToStart else { return }
         activeMachine = machine
-        vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware())
+        vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
+                installer: installer)
         showSession = true
+    }
+
+    private func buildInstaller(for mediaID: UUID, output: URL) {
+        let iso = MediaShelf.shared.repository.isoURL(for: mediaID)
+        doFileWork {
+            try InstallerPreparation.build(iso: iso, output: output) { _ in }
+        }
+    }
+
+    private func adoptInstalledDisk(_ machine: VirtualMachine, removeInstaller: Bool) {
+        let repository = repo
+        let folder = repository.directory(for: machine)
+        doFileWork {
+            let disk = folder.appendingPathComponent(VMRepository.rawDisk)
+            try InstallerPreparation.verifyWindowsBootFiles(disk)
+            var installed = machine
+            installed.installation = .preparedDisk
+            try repository.update(installed)
+            if removeInstaller {
+                let installer = folder.appendingPathComponent(VMRepository.installerDisk)
+                if FileManager.default.fileExists(atPath: installer.path) {
+                    try FileManager.default.removeItem(at: installer)
+                }
+            }
+        }
     }
 
     private func refresh() {
@@ -242,6 +302,7 @@ private struct MachineLibraryView: View {
                 try await Task.detached(priority: .userInitiated, operation: action).value
                 refresh()
             } catch {
+                refresh()
                 self.error = error.localizedDescription
             }
         }
@@ -367,7 +428,9 @@ struct HardwareFields: View {
             Text("Hardware")
         } footer: {
             if hardware.jitMiB > Int(maximumJITMiB) {
-                Text("This preset is saved for testing. The current engine refuses to start with a JIT cache above \(maximumJITMiB) MiB.")
+                Text("This build can request at most \(maximumJITMiB) MiB.")
+            } else if hardware.jitMiB > (HardwarePreset.compatibility.settings?.jitMiB ?? 384) {
+                Text("Larger caches are experimental. Start this VM before enabling JIT so the app can request its selected mapping.")
             } else if hardware.preset == .automatic {
                 Text("Automatic uses the original device-based memory allocation.")
             }

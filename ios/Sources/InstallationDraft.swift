@@ -14,7 +14,7 @@ struct InstallationDraft: Codable, Equatable {
             case .hardware: "VM hardware"
             case .storage: "Virtual storage"
             case .review: "Review"
-            case .preparing: "Disk and firmware preparation"
+            case .preparing: "Preparing the installer"
             case .prepared: "Preparation complete"
             }
         }
@@ -26,6 +26,7 @@ struct InstallationDraft: Codable, Equatable {
     var hardware = VMHardware()
     var capacityGiB = 64
     var mediaID: UUID?
+    var driverID: UUID?
     var lastError: String?
 
     func validateForPreparation() throws {
@@ -60,11 +61,20 @@ struct InstallationDraftStore: Sendable {
         try Data(contentsOf: source).write(to: destination, options: .atomic)
     }
 
-    func prepare(_ draft: InstallationDraft, repository: VMRepository) throws -> VirtualMachine {
+    func installerURL(for draft: InstallationDraft, media: UUID) -> URL {
+        let drivers = draft.driverID?.uuidString ?? "no-drivers"
+        return root.appendingPathComponent("Installer-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers).img")
+    }
+
+    func driversURL(for id: UUID) -> URL {
+        root.appendingPathComponent("NetKVM-\(id.uuidString)", isDirectory: true)
+    }
+
+    func prepare(_ draft: InstallationDraft, repository: VMRepository, installer: URL? = nil) throws -> VirtualMachine {
         try draft.validateForPreparation()
         return try repository.createBlank(id: draft.machineID, name: draft.name, hardware: draft.hardware,
                                           capacityGiB: draft.capacityGiB, mediaID: draft.mediaID,
-                                          code: code, variables: variables)
+                                          code: code, variables: variables, installer: installer)
     }
 
     func cleanupFirmwareCopies() {

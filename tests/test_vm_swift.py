@@ -20,7 +20,7 @@ class SwiftFoundationTests(unittest.TestCase):
     def test_machine_configuration_media_and_recovery(self):
         sources = [
             "VirtualMachine", "InstallationDraft", "WindowsImageMetadata",
-            "WindowsMediaRepository", "WindowsDownload", "PreparedDisk",
+            "WindowsMediaRepository", "WindowsDownload", "PreparedDisk", "NetKVMDrivers",
         ]
         with tempfile.TemporaryDirectory() as workspace:
             binary = Path(workspace) / "test-vm-foundation"

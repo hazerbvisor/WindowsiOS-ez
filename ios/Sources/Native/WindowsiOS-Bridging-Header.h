@@ -3,3 +3,4 @@
 #include "winios_jit.h"
 #include "hvsparse.h"
 #include <udfread/udfread.h>
+#include "installer_winpe.h"

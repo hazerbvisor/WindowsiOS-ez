@@ -12,6 +12,10 @@ struct WindowsMedia: Codable, Equatable, Identifiable {
 struct WindowsMediaRepository: Sendable {
     let root: URL
 
+    func isoURL(for id: UUID) -> URL {
+        root.appendingPathComponent(id.uuidString).appendingPathComponent("Windows.iso")
+    }
+
     func list() throws -> [WindowsMedia] {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)

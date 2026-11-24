@@ -43,7 +43,7 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
     var hardware: VMHardware
-    let installation: Installation
+    var installation: Installation
     let capacityGiB: Int?
     let mediaID: UUID?
 
@@ -87,6 +87,7 @@ struct VMRepository: Sendable {
     static let packedDisk = "windows11.hvsparse"
     static let firmware = "code.fd"
     static let nvram = "vars.fd"
+    static let installerDisk = "installer.img"
     static let minimumDiskBytes: UInt64 = 64 << 20
     private static let flashBankBytes: UInt64 = 64 << 20
 
@@ -126,7 +127,7 @@ struct VMRepository: Sendable {
     }
 
     func createBlank(id: UUID, name: String, hardware: VMHardware, capacityGiB: Int, mediaID: UUID?,
-                     code: URL, variables: URL) throws -> VirtualMachine {
+                     code: URL, variables: URL, installer: URL? = nil) throws -> VirtualMachine {
         let machine = VirtualMachine(id: id, name: name, hardware: hardware, installation: .blankDisk,
                                      capacityGiB: capacityGiB, mediaID: mediaID)
         if FileManager.default.fileExists(atPath: directory(for: machine).path) {
@@ -137,6 +138,10 @@ struct VMRepository: Sendable {
         }
         try publish(machine) { stage in
             try copyFirmware(code: code, variables: variables, to: stage)
+            if let installer {
+                _ = try regularFileSize(installer)
+                try FileManager.default.linkItem(at: installer, to: stage.appendingPathComponent(Self.installerDisk))
+            }
             let disk = stage.appendingPathComponent(Self.rawDisk)
             guard FileManager.default.createFile(atPath: disk.path, contents: nil) else {
                 throw VMError.message("Unable to create the virtual disk.")

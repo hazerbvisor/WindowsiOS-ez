@@ -215,8 +215,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     [self notifyChanged];
 }
 
-- (BOOL)tryAcquireJIT:(BOOL)detachAfter {
-    BOOL ok = winios_jit_acquire(WINIOS_JIT_DEFAULT_BYTES, detachAfter);
+- (BOOL)tryAcquireJIT:(BOOL)detachAfter jitMiB:(uint64_t)jitMiB ramMiB:(uint64_t)ramMiB {
+    if (jitMiB == 0 || jitMiB > self.maximumJITMiB) return NO;
+    BOOL ok = winios_jit_acquire((size_t)jitMiB << 20, ramMiB, detachAfter);
     dispatch_async(_diagQueue, ^{
         [self writeDiagnosticsSnapshot];
     });
@@ -269,7 +270,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (uint64_t)maximumJITMiB {
-    return WINIOS_JIT_DEFAULT_BYTES >> 20;
+    return WINIOS_JIT_EXPERIMENTAL_MAX_BYTES >> 20;
 }
 
 - (uint64_t)availableMemoryMB {
@@ -362,6 +363,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (void)prepareAndStartInDirectory:(nullable NSString *)directory
+                         installer:(nullable NSString *)installer
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
                               cpus:(int)cpus {
@@ -371,16 +373,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
     if (jitMiB == 0 || jitMiB > self.maximumJITMiB || cpus < 1 || cpus > HV_MAX_CPUS) {
-        [self reportStartFailure:@"This build supports up to 384 MiB of JIT cache and four vCPUs. Choose Compatibility or change the hardware settings."];
+        [self reportStartFailure:@"This build accepts 1–1536 MiB of JIT cache and one to four vCPUs. Choose Compatibility or change the hardware settings."];
         return;
     }
 
     if (!self.isJITLive) {
-        [self tryAcquireJIT:YES];
+        [self tryAcquireJIT:YES jitMiB:jitMiB ramMiB:ramMiB];
         if (!self.isJITLive) {
-            _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_duo.sh)";
-            dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
-            [self notifyChanged];
+            [self reportStartFailure:self.jitStatusText];
             return;
         }
     }
@@ -412,7 +412,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                 self->_unpacking = NO;
                 if (rc == 0) {
                     self->_unpackProgress = 1.0;
-                    [self startConfiguredVMInDirectory:dir ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
+                    [self startConfiguredVMInDirectory:dir installer:installer ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
                 } else {
                     self->_vmStatus = @"Could not import the sparse disk. Check the archive, free space and whether windows11.img already exists.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -423,10 +423,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    [self startConfiguredVMInDirectory:dir ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
+    [self startConfiguredVMInDirectory:dir installer:installer ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
 }
 
-- (void)startConfiguredVMInDirectory:(NSString *)dir ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus {
+- (void)startConfiguredVMInDirectory:(NSString *)dir installer:(nullable NSString *)installer ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus {
     if (_vmRunning || _engineUsed) return;
 
     WinIosDualMapping jit = winios_jit_mapping();
@@ -463,7 +463,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
 
     if ((jit.size >> 20) < jitMiB) {
-        [self reportStartFailure:@"The active JIT mapping is smaller than the selected cache."];
+        [self reportStartFailure:@"The active JIT mapping is smaller than this VM’s setting. Reopen the app and start this VM before enabling JIT."];
         return;
     }
 
@@ -486,11 +486,16 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _configuredRamMB = ramMB;
     _configuredCPUs = cpus;
 
+    if (installer && ![[NSFileManager defaultManager] isReadableFileAtPath:installer]) {
+        [self reportStartFailure:@"The Windows Setup disk could not be opened."];
+        return;
+    }
+
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
-        .disk1 = NULL,
+        .disk1 = installer ? installer.fileSystemRepresentation : NULL,
         .share_dir = sharedDir.fileSystemRepresentation,
         .share_sock = shareSock.fileSystemRepresentation,
         .ncpus = _configuredCPUs,
@@ -525,7 +530,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _lastMachTicks = mach_absolute_time();
     _lastWfiTicks = 0;
     _lastWfiIdlePct = 0.0;
-    _vmStatus = [NSString stringWithFormat:@"Running Windows 11 ARM64 (%d vCPUs, %llu MB RAM)", _configuredCPUs, _configuredRamMB];
+    _vmStatus = [NSString stringWithFormat:@"%@ (%d vCPUs, %llu MiB guest RAM)",
+                 installer ? @"Windows Setup session" : @"Windows 11 ARM64 session", _configuredCPUs, _configuredRamMB];
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
 
     hv_winvm_start(1, vm_exit_trampoline);

@@ -79,6 +79,8 @@ targets:
           - -lpcre2-8
           - -lffi
           - -ludfread
+          - -lfatfs
+          - -lwim
           - -lresolv
           - -liconv
     dependencies:

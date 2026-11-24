@@ -7,6 +7,10 @@ enum PreparedDisk {
                                                       0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b])
 
     static func validate(_ url: URL) throws {
+        _ = try efiPartition(in: url)
+    }
+
+    static func efiPartition(in url: URL) throws -> (start: UInt64, sectors: UInt64) {
         let size = try regularFileSize(url)
         guard size >= VMRepository.minimumDiskBytes, size % sector == 0 else {
             throw VMError.message("The prepared disk must use the emulator’s 512-byte sectors.")
@@ -49,7 +53,7 @@ enum PreparedDisk {
             where table[offset..<(offset + 16)] == efiSystemPartitionType {
             let first = table.littleEndian(at: offset + 32, bytes: 8)
             let last = table.littleEndian(at: offset + 40, bytes: 8)
-            if first >= firstLBA, first <= last, last <= lastLBA { return }
+            if first >= firstLBA, first <= last, last <= lastLBA { return (first, last - first + 1) }
         }
         throw VMError.message("The prepared disk has no valid EFI system partition.")
     }

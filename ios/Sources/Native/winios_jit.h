@@ -20,11 +20,14 @@ typedef struct WinIosDualMapping {
     size_t   size;
 } WinIosDualMapping;
 
-#define WINIOS_JIT_DEFAULT_BYTES ((size_t)384u << 20) /* 384 MiB */
+#define WINIOS_JIT_DEFAULT_BYTES ((size_t)384u << 20)
+/* Allow requests through the largest experimental preset. The OS and debugger
+ * still decide whether a low executable mapping can actually be obtained. */
+#define WINIOS_JIT_EXPERIMENTAL_MAX_BYTES ((size_t)1536u << 20)
 
 void winios_jit_install_trap_handler(void);
 bool winios_jit_is_debugger_attached(void);
-bool winios_jit_acquire(size_t bytes, bool detach_after);
+bool winios_jit_acquire(size_t bytes, uint64_t requested_ram_mib, bool detach_after);
 bool winios_jit_is_live(void);
 WinIosDualMapping winios_jit_mapping(void);
 void *winios_jit_guest_ram(uint64_t *out_bytes);

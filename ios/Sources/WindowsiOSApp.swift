@@ -7,7 +7,15 @@ struct WindowsiOSApp: App {
     @StateObject private var viewModel = VMViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
-    private static let recoverStorage: Void = removeAbandonedStaging(in: VMFiles.repository.root)
+    private static let recoverStorage: Void = {
+        let repository = VMFiles.repository
+        removeAbandonedStaging(in: repository.root)
+        if let machines = try? repository.list() {
+            for machine in machines {
+                removeAbandonedStaging(in: repository.directory(for: machine))
+            }
+        }
+    }()
 
     init() {
         _ = Self.recoverStorage

@@ -64,6 +64,7 @@ final class VMViewModel: ObservableObject {
     @Published var isDebuggerAttached: Bool = false
     @Published var isVMRunning: Bool = false
     @Published var needsRelaunchToStart = false
+    @Published private(set) var isSetupSession = false
     @Published var isUnpacking: Bool = false
     @Published var unpackProgress: Double = 0
     @Published var jitStatusText: String = "Checking JIT..."
@@ -91,6 +92,7 @@ final class VMViewModel: ObservableObject {
     @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
 
     private var bootDirectory: URL?
+    private var bootInstaller: URL?
     private var bootHardware = VMHardware()
     private var oauthPollTimer: Timer? = nil
 
@@ -244,19 +246,22 @@ final class VMViewModel: ObservableObject {
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
         if !b.isJITLive && b.isDebuggerAttached {
-            _ = b.tryAcquireJIT(true)
+            _ = b.tryAcquireJIT(detachAfter: true, jitMiB: UInt64(bootHardware.jitMiB),
+                                ramMiB: UInt64(bootHardware.ramMiB))
         }
         syncFromBridge()
     }
 
-    func open(directory: URL?, hardware: VMHardware) {
+    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil) {
         bootDirectory = directory
+        bootInstaller = installer
+        isSetupSession = installer != nil
         bootHardware = hardware
         startOrRetry()
     }
 
     func startOrRetry() {
-        WinIOSBridge.shared.start(directory: bootDirectory?.path, ramMiB: UInt64(bootHardware.ramMiB),
+        WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, ramMiB: UInt64(bootHardware.ramMiB),
                                   jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()
     }

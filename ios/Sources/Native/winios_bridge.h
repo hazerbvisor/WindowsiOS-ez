@@ -34,14 +34,17 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)takeGuestOAuthDone;
 
 - (void)installTrapGuard;
-- (BOOL)tryAcquireJIT:(BOOL)detachAfter;
+- (BOOL)tryAcquireJIT:(BOOL)detachAfter
+                jitMiB:(uint64_t)jitMiB
+                ramMiB:(uint64_t)ramMiB NS_SWIFT_NAME(tryAcquireJIT(detachAfter:jitMiB:ramMiB:));
 
 - (BOOL)hasProvisionedMachine;
 - (BOOL)needsSparseUnpack;
 - (void)prepareAndStartInDirectory:(nullable NSString *)directory
+                         installer:(nullable NSString *)installer
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
-                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:ramMiB:jitMiB:cpus:));
+                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:ramMiB:jitMiB:cpus:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;

@@ -7,7 +7,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DEPS="$ROOT/ios/deps"
-LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a libudfread.a)
+LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a libudfread.a libfatfs.a libwim.a)
 
 ARCH=arm64
 SDK=iphoneos
@@ -17,6 +17,7 @@ SDKROOT="$(xcrun --sdk "$SDK" --show-sdk-path)"
 PYTHON="$(command -v python3)"
 KEY="$({
     shasum -a 256 < "$ROOT/scripts/build_ios_deps.sh"
+    shasum -a 256 < "$ROOT/scripts/prepare_fatfs.sh"
     xcodebuild -version
     xcrun --sdk "$SDK" --show-sdk-build-version
     meson --version
@@ -30,7 +31,8 @@ cache_ready() {
     [ -f "$OUT_DEPS/build-key" ] && [ "$(cat "$OUT_DEPS/build-key")" = "$KEY" ] || return 1
     [ -s "$OUT_DEPS/include/slirp/libslirp.h" ] &&
         [ -s "$OUT_DEPS/include/slirp/libslirp-version.h" ] &&
-        [ -s "$OUT_DEPS/include/udfread/udfread.h" ] || return 1
+        [ -s "$OUT_DEPS/include/udfread/udfread.h" ] &&
+        [ -s "$OUT_DEPS/include/wimlib.h" ] && [ -s "$OUT_DEPS/include/fatfs/ff.h" ] || return 1
     for lib in "${LIBS[@]}"; do
         [ -s "$OUT_DEPS/lib/$lib" ] || return 1
     done
@@ -72,6 +74,7 @@ FFI_URL="https://github.com/libffi/libffi/releases/download/v3.5.0/libffi-3.5.0.
 GLIB_URL="https://download.gnome.org/sources/glib/2.83/glib-2.83.0.tar.xz"
 SLIRP_URL="https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
 UDF_URL="https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz"
+WIM_URL="https://wimlib.net/downloads/wimlib-1.14.5.tar.gz"
 
 fetch_unpack() {
     local url="$1" checksum="$2"
@@ -95,6 +98,7 @@ fetch_unpack "$FFI_URL" 8c72678628a5dd8782f08ad421d5a441e42c1c5c1b33e0bc211cbfcf
 fetch_unpack "$GLIB_URL" a07d9e1a57a4279c5ece71c26dc44eea12bd518ea9ff695d53e722997032b614
 fetch_unpack "$SLIRP_URL" 3970542143b7c11e6a09a4d2b50f30a133473c41f15ed0bdcc3b7a1c450d9a5c
 fetch_unpack "$UDF_URL" bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f
+fetch_unpack "$WIM_URL" 84221a3abd5b91228f15f8e6065c335a336237b5738197b75bf419eea561a194
 
 meson_quote() { echo "'$(echo $* | sed "s/ /','/g")'"; }
 
@@ -198,6 +202,30 @@ if [ ! -f "$STAMPS/libudfread" ]; then
     touch "$STAMPS/libudfread"
 fi
 
+# 5. wimlib (the WIM library only, without desktop utilities)
+if [ ! -f "$STAMPS/libwim" ]; then
+    echo "[build] wimlib-1.14.5"
+    ( cd "$SRC/wimlib-1.14.5" \
+      && ./configure --host=aarch64-apple-darwin --prefix="$PREFIX" \
+            --enable-static --disable-shared --without-fuse --without-ntfs-3g \
+      && make -j"$NCPU" libwim.la \
+      && make install-libLTLIBRARIES install-includeHEADERS ) > "$WORK_DEPS/wimlib.log" 2>&1 || show_failure "$WORK_DEPS/wimlib.log"
+    touch "$STAMPS/libwim"
+fi
+
+# 6. FatFs (code and one Unicode table; the app provides its bounded disk adapter)
+if [ ! -f "$STAMPS/fatfs" ]; then
+    echo "[build] FatFs R0.16"
+    FATFS="$SRC/fatfs"
+    "$ROOT/scripts/prepare_fatfs.sh" "$FATFS"
+    mkdir -p "$PREFIX/include/fatfs"
+    cp "$FATFS/"*.h "$PREFIX/include/fatfs/"
+    ( cd "$FATFS" \
+      && $CC $CFLAGS -c ff.c ffunicode.c \
+      && "$AR" rcs "$PREFIX/lib/libfatfs.a" ff.o ffunicode.o ) > "$WORK_DEPS/fatfs.log" 2>&1 || show_failure "$WORK_DEPS/fatfs.log"
+    touch "$STAMPS/fatfs"
+fi
+
 # Stage only a complete set of headers and libraries.
 for lib in "${LIBS[@]}"; do
     if [ ! -s "$PREFIX/lib/$lib" ]; then
@@ -206,8 +234,9 @@ for lib in "${LIBS[@]}"; do
     fi
 done
 rm -f "$OUT_DEPS/build-key"
-rm -rf "$OUT_DEPS/include/slirp" "$OUT_DEPS/include/udfread"
-cp -R "$PREFIX/include/slirp" "$PREFIX/include/udfread" "$OUT_DEPS/include/"
+rm -rf "$OUT_DEPS/include/slirp" "$OUT_DEPS/include/udfread" "$OUT_DEPS/include/fatfs"
+cp -R "$PREFIX/include/slirp" "$PREFIX/include/udfread" "$PREFIX/include/fatfs" "$OUT_DEPS/include/"
+cp "$PREFIX/include/wimlib.h" "$OUT_DEPS/include/"
 for lib in "${LIBS[@]}"; do
     cp "$PREFIX/lib/$lib" "$OUT_DEPS/lib/$lib"
 done
