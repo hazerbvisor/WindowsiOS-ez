@@ -6,6 +6,7 @@ struct InstallationAssistant: View {
     enum InstallationFile { case code, variables, drivers }
 
     let vm: VMViewModel
+    let onLaunch: (VirtualMachine) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var shelf = MediaShelf.shared
     @State private var draft = InstallationDraft()
@@ -61,6 +62,12 @@ struct InstallationAssistant: View {
                 }
             }
             .task { load() }
+            .onChange(of: draft.mediaID) { _, _ in
+                if let index = draft.editionIndex, let media = selectedMedia,
+                   !media.images.contains(where: { $0.index == index }) {
+                    draft.editionIndex = nil
+                }
+            }
             .onChange(of: draft) { _, newDraft in
                 guard loaded else { return }
                 do { try store.save(newDraft) }
@@ -112,6 +119,16 @@ struct InstallationAssistant: View {
                     ForEach(shelf.items) { item in
                         Text(item.name).tag(Optional(item.id))
                     }
+                }
+                if let media = selectedMedia {
+                    Picker("Windows edition", selection: $draft.editionIndex) {
+                        Text("Choose in Windows Setup").tag(Int?.none)
+                        ForEach(media.images, id: \.index) { image in
+                            Text(image.name).tag(Optional(image.index))
+                        }
+                    }
+                    Text("Selecting an edition lets Setup partition a verified blank VM disk. Windows still asks you to accept its terms and complete account setup.")
+                        .foregroundStyle(.secondary)
                 }
                 Button("Open Downloads", systemImage: "arrow.down.circle") { showMedia = true }
             }
@@ -185,12 +202,28 @@ struct InstallationAssistant: View {
             }
         case .prepared:
             Label("Virtual machine saved", systemImage: "checkmark.circle")
-            Text("Open the machine in Virtual Machines to start Windows Setup or build the Setup disk for a previously saved VM. Windows Setup checks the guest hardware before installing.")
+            Text("Windows Setup checks the guest hardware and handles the standard Windows installation.")
                 .foregroundStyle(.secondary)
+            Button("Launch Windows Setup", systemImage: "play") {
+                do {
+                    guard let machine = try repository.list().first(where: { $0.id == draft.machineID }),
+                          FileManager.default.fileExists(atPath: repository.directory(for: machine)
+                            .appendingPathComponent(VMRepository.installerDisk).path) else {
+                        throw VMError.message("Open this machine in the library to build its Setup disk.")
+                    }
+                    try store.save(InstallationDraft())
+                    onLaunch(machine)
+                    dismiss()
+                } catch {
+                    self.error = error.localizedDescription
+                }
+            }
+            .disabled(vm.needsRelaunchToStart)
         }
     }
 
-    private var hasSelectedMedia: Bool { shelf.items.contains { $0.id == draft.mediaID } }
+    private var selectedMedia: WindowsMedia? { shelf.items.first { $0.id == draft.mediaID } }
+    private var hasSelectedMedia: Bool { selectedMedia != nil }
 
     private var continueLabel: String {
         switch draft.stage {
@@ -344,7 +377,7 @@ struct InstallationAssistant: View {
                     let input = preparing
                     let progress = $installerProgress
                     let work = Task.detached(priority: .userInitiated) {
-                        try InstallerPreparation.build(iso: iso, output: stageDisk, drivers: drivers) { status in
+                        try InstallerPreparation.build(iso: iso, output: stageDisk, drivers: drivers, edition: input.editionIndex) { status in
                             Task { @MainActor in progress.wrappedValue = status }
                         }
                         try Task.checkCancellation()

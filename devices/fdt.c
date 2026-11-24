@@ -111,7 +111,7 @@ static void fdt_prop_strlist(Buf *st, Buf *strs, const char *name, const char *c
 #define PHANDLE_V2M  0x8007U
 #define PHANDLE_CPU0 0x8100U
 
-uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size_t *out_size) {
+uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, uint32_t tpm_address, size_t *out_size) {
     if (ncpus < 1 || ncpus > 64) return NULL;
 
     Buf st = {0}, strs = {0};
@@ -148,6 +148,16 @@ uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size
         };
         fdt_prop_cells(&st, &strs, "reg", reg, 4);
         fdt_prop_str(&st, &strs, "device_type", "memory");
+        fdt_end_node(&st);
+    }
+
+    if (tpm_address) {
+        char name[24];
+        snprintf(name, sizeof name, "tpm@%x", tpm_address);
+        uint32_t reg[4] = {0, tpm_address, 0, 0x5000};
+        fdt_begin_node(&st, name);
+        fdt_prop_str(&st, &strs, "compatible", "tcg,tpm-tis-mmio");
+        fdt_prop_cells(&st, &strs, "reg", reg, 4);
         fdt_end_node(&st);
     }
 

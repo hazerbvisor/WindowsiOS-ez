@@ -80,9 +80,10 @@ IB = build/ios
 IOS_C_SRC = $(wildcard core/*.c) \
             host/jit_region.c host/disk.c host/winvm.c host/net_slirp.c host/share.c \
             host/audio_mac.c host/hvsparse.c host/prof_ios.c \
-            host/installer_disk.c host/installer_winpe.c \
+            host/installer_disk.c host/installer_winpe.c host/tpm_device.c \
             $(wildcard devices/*.c)
-$(IB)/host/installer_disk.o $(IB)/host/installer_winpe.o: IOS_CFLAGS += -D_DARWIN_C_SOURCE
+$(IB)/host/installer_disk.o $(IB)/host/installer_winpe.o $(IB)/host/tpm_device.o: IOS_CFLAGS += -D_DARWIN_C_SOURCE
+$(IB)/devices/winvirt.o: IOS_CFLAGS += -DWINIOS_DEVICE_TPM
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_C_SRC)) $(IB)/host/enter.o $(IB)/devices/fb_metal.o
 
 $(IB)/core/mmu.o: core/mmu.c core/*.h host/*.h devices/*.h

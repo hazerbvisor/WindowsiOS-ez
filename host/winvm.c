@@ -19,6 +19,9 @@
 #include "dispatch.h"
 #include "net_slirp.h"
 #include "share.h"
+#if TARGET_OS_IPHONE
+#include "installer_disk.h"
+#endif
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
@@ -30,6 +33,9 @@ static HvDisk disk1 = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
+#if TARGET_OS_IPHONE
+static char *setup_disk_path;
+#endif
 
 static os_unfair_lock display_lock = OS_UNFAIR_LOCK_INIT;
 static CFTypeRef display_layer;
@@ -162,6 +168,10 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         d0_ptr = &disk0;
     }
     if (c->disk1 && *c->disk1) {
+#if TARGET_OS_IPHONE
+        if (winios_configure_installer_answer(c->disk1, c->disk0) != 0)
+            return fail(err, errlen, "Cannot prepare safe Windows Setup options for this installer disk.");
+#endif
         if (hv_disk_open(&disk1, c->disk1, 0, 1) != 0)
             return fail(err, errlen, "Cannot open secondary/installer disk image.");
         d1_ptr = &disk1;
@@ -184,10 +194,22 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
 
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
-    if (hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                          d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
+    int board_result = hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
+                                         d0_ptr, d1_ptr, mac, c->enable_sound, c->tpm_state_directory);
+    if (board_result != 0) {
+        hv_winvirt_close_tpm(&board);
+        if (board_result == -2) return fail(err, errlen, "Cannot initialize the VM's TPM 2.0 state.");
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
+#if TARGET_OS_IPHONE
+    if (d1_ptr) {
+        setup_disk_path = strdup(c->disk1);
+        if (!setup_disk_path) {
+            hv_winvirt_close_tpm(&board);
+            return fail(err, errlen, "Cannot keep the Windows Setup disk state for guest restart.");
+        }
+    }
+#endif
     hv_winvirt_reset_cpu(&board);
 
     share_on = 0;
@@ -273,6 +295,12 @@ int hv_winvm_run_cpu0(void) {
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
+#if TARGET_OS_IPHONE
+            if (setup_disk_path && winios_configure_installer_answer(setup_disk_path, NULL) != 0) {
+                fprintf(stderr, "winvm: could not disarm unattended Setup; stopping the VM\n");
+                return HV_EXIT_HALT;
+            }
+#endif
             /* Reset GIC, ITS, PCIe, and pflash state for warm reboot */
             if (board.gic) {
                 pthread_mutex_lock(&board.gic->mu);
@@ -299,6 +327,10 @@ int hv_winvm_run_cpu0(void) {
                 board.flash1->status = 0x80;
             }
             if (board.fb) board.fb->active = 0;
+            if (hv_winvirt_reset_tpm(&board) != 0) {
+                fprintf(stderr, "winvm: TPM 2.0 reset failed; stopping the VM\n");
+                return HV_EXIT_HALT;
+            }
             hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;
             spawn_secondaries();
@@ -314,6 +346,11 @@ static void *cpu0_thread(void *unused) {
     int was_stopping = atomic_exchange(&stop_requested, 1);
     join_secondaries();
     hv_winvm_flush_disks();
+    hv_winvirt_close_tpm(&board);
+#if TARGET_OS_IPHONE
+    free(setup_disk_path);
+    setup_disk_path = NULL;
+#endif
     if (!was_stopping) hv_audio_shutdown();
     if (exit_cb) exit_cb(r);
     return NULL;

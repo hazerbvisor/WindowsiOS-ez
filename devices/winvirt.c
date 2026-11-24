@@ -17,6 +17,9 @@
 
 #include "mmu.h"
 #include "timer.h"
+#ifdef WINIOS_DEVICE_TPM
+#include "tpm_device.h"
+#endif
 
 extern kern_return_t mach_memory_entry_ownership(mach_port_t entry, task_t owner, int ledger_tag, int ledger_flags);
 
@@ -117,7 +120,8 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound) {
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      const char *tpm_state_directory) {
     memset(b, 0, sizeof *b);
     b->m = m;
     b->cpu = cpu;
@@ -155,7 +159,19 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     if (b->ram == MAP_FAILED) return -1;
 
     /* 2. Build Flattened Device Tree (placed at 0x40000000 on every reset) */
-    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, &b->dtb_size);
+    uint32_t tpm_address = 0;
+    if (tpm_state_directory && *tpm_state_directory) {
+#ifdef WINIOS_DEVICE_TPM
+        b->tpm = winios_tpm_open(tpm_state_directory);
+        if (!b->tpm) return -2;
+        tpm_address = WINVIRT_TPM_PA;
+        hv_machine_add_mmio(m, tpm_address, WINIOS_TPM_MMIO_SIZE, b->tpm,
+                            winios_tpm_read, winios_tpm_write, "tpm2-fifo");
+#else
+        return -2;
+#endif
+    }
+    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, tpm_address, &b->dtb_size);
     if (!b->dtb || b->dtb_size > ram_size) return -1;
 
     /* 3. Flash banks: pflash0 (64 MB read-only UEFI code HvRam) & pflash1 (64 MB persistent CFI01 NVRAM) */
@@ -186,7 +202,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
 
     b->fw_cfg = hv_fw_cfg_create(m, WINVIRT_FW_CFG_PA, (uint16_t)ncpus);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
-    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
+    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0, tpm_address);
 
     /* 7. PCIe Root Complex (GPEX):
      *    Slot 0: Host Bridge (1b36:0008)
@@ -235,4 +251,20 @@ void hv_winvirt_power_button(HvWinVirt *b) {
     if (!b || !b->gic) return;
     __atomic_fetch_or(&b->ged_events, 0x2U, __ATOMIC_ACQ_REL);
     hv_gicv3_pend(b->gic, WINVIRT_INTID_GED);
+}
+
+int hv_winvirt_reset_tpm(HvWinVirt *b) {
+#ifdef WINIOS_DEVICE_TPM
+    if (b->tpm) return winios_tpm_reset(b->tpm);
+#else
+    (void)b;
+#endif
+    return 0;
+}
+
+void hv_winvirt_close_tpm(HvWinVirt *b) {
+#ifdef WINIOS_DEVICE_TPM
+    if (b->tpm) winios_tpm_close(b->tpm);
+#endif
+    b->tpm = NULL;
 }

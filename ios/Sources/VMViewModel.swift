@@ -93,6 +93,7 @@ final class VMViewModel: ObservableObject {
 
     private var bootDirectory: URL?
     private var bootInstaller: URL?
+    private var bootUsesTPM = false
     private var bootHardware = VMHardware()
     private var oauthPollTimer: Timer? = nil
 
@@ -252,16 +253,17 @@ final class VMViewModel: ObservableObject {
         syncFromBridge()
     }
 
-    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil) {
+    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false) {
         bootDirectory = directory
         bootInstaller = installer
+        bootUsesTPM = useTPM || installer != nil
         isSetupSession = installer != nil
         bootHardware = hardware
         startOrRetry()
     }
 
     func startOrRetry() {
-        WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, ramMiB: UInt64(bootHardware.ramMiB),
+        WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, useTPM: bootUsesTPM, ramMiB: UInt64(bootHardware.ramMiB),
                                   jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()
     }

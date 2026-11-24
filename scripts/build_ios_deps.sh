@@ -7,7 +7,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DEPS="$ROOT/ios/deps"
-LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a libudfread.a libfatfs.a libwim.a)
+LIBS=(libslirp.a libglib-2.0.a libintl.a libpcre2-8.a libffi.a libudfread.a libfatfs.a libwim.a libtpms.a libcrypto.a)
 
 ARCH=arm64
 SDK=iphoneos
@@ -24,6 +24,8 @@ KEY="$({
     ninja --version
     pkg-config --version
     "$PYTHON" --version
+    autoconf --version | sed -n '1p'
+    automake --version | sed -n '1p'
     printf '%s\n' "$ARCH" "$SDK" "$SDKMINVER"
 } | shasum -a 256 | cut -d ' ' -f 1)"
 
@@ -32,7 +34,8 @@ cache_ready() {
     [ -s "$OUT_DEPS/include/slirp/libslirp.h" ] &&
         [ -s "$OUT_DEPS/include/slirp/libslirp-version.h" ] &&
         [ -s "$OUT_DEPS/include/udfread/udfread.h" ] &&
-        [ -s "$OUT_DEPS/include/wimlib.h" ] && [ -s "$OUT_DEPS/include/fatfs/ff.h" ] || return 1
+        [ -s "$OUT_DEPS/include/wimlib.h" ] && [ -s "$OUT_DEPS/include/fatfs/ff.h" ] &&
+        [ -s "$OUT_DEPS/include/libtpms/tpm_library.h" ] || return 1
     for lib in "${LIBS[@]}"; do
         [ -s "$OUT_DEPS/lib/$lib" ] || return 1
     done
@@ -75,6 +78,8 @@ GLIB_URL="https://download.gnome.org/sources/glib/2.83/glib-2.83.0.tar.xz"
 SLIRP_URL="https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
 UDF_URL="https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz"
 WIM_URL="https://wimlib.net/downloads/wimlib-1.14.5.tar.gz"
+OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz"
+TPMS_URL="https://deb.debian.org/debian/pool/main/libt/libtpms/libtpms_0.10.2.orig.tar.gz"
 
 fetch_unpack() {
     local url="$1" checksum="$2"
@@ -99,6 +104,8 @@ fetch_unpack "$GLIB_URL" a07d9e1a57a4279c5ece71c26dc44eea12bd518ea9ff695d53e7229
 fetch_unpack "$SLIRP_URL" 3970542143b7c11e6a09a4d2b50f30a133473c41f15ed0bdcc3b7a1c450d9a5c
 fetch_unpack "$UDF_URL" bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f
 fetch_unpack "$WIM_URL" 84221a3abd5b91228f15f8e6065c335a336237b5738197b75bf419eea561a194
+fetch_unpack "$OPENSSL_URL" 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+fetch_unpack "$TPMS_URL" edac03680f8a4a1c5c1d609a10e3f41e1a129e38ff5158f0c8deaedc719fb127
 
 meson_quote() { echo "'$(echo $* | sed "s/ /','/g")'"; }
 
@@ -226,6 +233,33 @@ if [ ! -f "$STAMPS/fatfs" ]; then
     touch "$STAMPS/fatfs"
 fi
 
+# 7. The TPM backend uses the OpenSSL crypto archive. Build device code only.
+if [ ! -f "$STAMPS/libcrypto" ]; then
+    echo "[build] OpenSSL-3.5.9 libcrypto"
+    ( cd "$SRC/openssl-3.5.9" \
+      && unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS AR NM RANLIB \
+      && export CROSS_TOP="$(dirname "$(dirname "$SDKROOT")")" \
+                CROSS_SDK="$(basename "$SDKROOT")" IPHONEOS_DEPLOYMENT_TARGET="$SDKMINVER" \
+      && ./Configure ios64-xcrun no-shared no-asm no-apps no-tests no-module no-dso -miphoneos-version-min="$SDKMINVER" \
+      && make -j"$NCPU" libcrypto.a \
+      && mkdir -p "$PREFIX/include/openssl" \
+      && cp include/openssl/*.h "$PREFIX/include/openssl/" \
+      && cp libcrypto.a "$PREFIX/lib/" ) > "$WORK_DEPS/openssl.log" 2>&1 || show_failure "$WORK_DEPS/openssl.log"
+    touch "$STAMPS/libcrypto"
+fi
+
+if [ ! -f "$STAMPS/libtpms" ]; then
+    echo "[build] libtpms-0.10.2"
+    ( cd "$SRC/libtpms-0.10.2" \
+      && export LIBTOOLIZE="$(brew --prefix libtool)/bin/glibtoolize" \
+      && ./autogen.sh --host=aarch64-apple-darwin --prefix="$PREFIX" \
+            --enable-static --disable-shared --with-tpm2 --without-tpm1 --with-openssl \
+      && make -j"$NCPU" -C src \
+      && make -C src install \
+      && make -C include install ) > "$WORK_DEPS/libtpms.log" 2>&1 || show_failure "$WORK_DEPS/libtpms.log"
+    touch "$STAMPS/libtpms"
+fi
+
 # Stage only a complete set of headers and libraries.
 for lib in "${LIBS[@]}"; do
     if [ ! -s "$PREFIX/lib/$lib" ]; then
@@ -234,8 +268,8 @@ for lib in "${LIBS[@]}"; do
     fi
 done
 rm -f "$OUT_DEPS/build-key"
-rm -rf "$OUT_DEPS/include/slirp" "$OUT_DEPS/include/udfread" "$OUT_DEPS/include/fatfs"
-cp -R "$PREFIX/include/slirp" "$PREFIX/include/udfread" "$PREFIX/include/fatfs" "$OUT_DEPS/include/"
+rm -rf "$OUT_DEPS/include/slirp" "$OUT_DEPS/include/udfread" "$OUT_DEPS/include/fatfs" "$OUT_DEPS/include/libtpms"
+cp -R "$PREFIX/include/slirp" "$PREFIX/include/udfread" "$PREFIX/include/fatfs" "$PREFIX/include/libtpms" "$OUT_DEPS/include/"
 cp "$PREFIX/include/wimlib.h" "$OUT_DEPS/include/"
 for lib in "${LIBS[@]}"; do
     cp "$PREFIX/lib/$lib" "$OUT_DEPS/lib/$lib"

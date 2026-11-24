@@ -364,6 +364,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)prepareAndStartInDirectory:(nullable NSString *)directory
                          installer:(nullable NSString *)installer
+                             useTPM:(BOOL)useTPM
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
                               cpus:(int)cpus {
@@ -412,7 +413,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                 self->_unpacking = NO;
                 if (rc == 0) {
                     self->_unpackProgress = 1.0;
-                    [self startConfiguredVMInDirectory:dir installer:installer ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
+                    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
                 } else {
                     self->_vmStatus = @"Could not import the sparse disk. Check the archive, free space and whether windows11.img already exists.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -423,10 +424,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    [self startConfiguredVMInDirectory:dir installer:installer ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
+    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus];
 }
 
-- (void)startConfiguredVMInDirectory:(NSString *)dir installer:(nullable NSString *)installer ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus {
+- (void)startConfiguredVMInDirectory:(NSString *)dir installer:(nullable NSString *)installer useTPM:(BOOL)useTPM ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus {
     if (_vmRunning || _engineUsed) return;
 
     WinIosDualMapping jit = winios_jit_mapping();
@@ -491,11 +492,31 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
+    NSString *tpmState = nil;
+    if (useTPM) {
+        tpmState = [dir stringByAppendingPathComponent:@"TPM"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (!installer && ![fm fileExistsAtPath:[tpmState stringByAppendingPathComponent:@"permall"]]) {
+            [self reportStartFailure:@"The VM's TPM state is missing. Restore it before starting this disk."];
+            return;
+        }
+        NSError *error = nil;
+        NSDictionary *protection = @{NSFilePosixPermissions: @0700,
+            NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication};
+        NSURL *tpmURL = [NSURL fileURLWithPath:tpmState isDirectory:YES];
+        if (![fm createDirectoryAtURL:tpmURL withIntermediateDirectories:YES attributes:protection error:&error] ||
+            ![tpmURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&error]) {
+            [self reportStartFailure:@"Could not prepare private storage for the VM's TPM state."];
+            return;
+        }
+    }
+
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
         .disk1 = installer ? installer.fileSystemRepresentation : NULL,
+        .tpm_state_directory = tpmState ? tpmState.fileSystemRepresentation : NULL,
         .share_dir = sharedDir.fileSystemRepresentation,
         .share_sock = shareSock.fileSystemRepresentation,
         .ncpus = _configuredCPUs,

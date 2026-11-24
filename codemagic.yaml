@@ -16,7 +16,7 @@ workflows:
           git submodule sync --recursive
           git submodule update --init --recursive
           export HOMEBREW_NO_AUTO_UPDATE=1
-          for formula in xcodegen meson ninja pkgconf; do
+          for formula in xcodegen meson ninja pkgconf autoconf automake libtool; do
             if ! brew list --versions "$formula" >/dev/null; then
               brew install "$formula"
             fi

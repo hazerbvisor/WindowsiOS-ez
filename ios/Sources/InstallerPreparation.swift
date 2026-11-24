@@ -24,7 +24,7 @@ enum InstallerPreparation {
         }
     }
 
-    static func build(iso: URL, output: URL, drivers: URL? = nil, progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
+    static func build(iso: URL, output: URL, drivers: URL? = nil, edition: Int? = nil, progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
         try Task.checkCancellation()
         let manager = FileManager.default
         if manager.fileExists(atPath: output.path) {
@@ -35,7 +35,10 @@ enum InstallerPreparation {
         }
 
         progress(InstallerProgress(stage: .checking, copied: 0, total: 0))
-        _ = try WindowsISO.inspect(iso)
+        let images = try WindowsISO.inspect(iso)
+        if let edition, !images.contains(where: { $0.index == edition }) {
+            throw VMError.message("The selected Windows edition is missing from this ISO.")
+        }
         let parent = output.deletingLastPathComponent()
         try manager.createDirectory(at: parent, withIntermediateDirectories: true)
         let workspace = parent.appendingPathComponent(".staging-\(UUID().uuidString)")
@@ -43,6 +46,8 @@ enum InstallerPreparation {
         defer { try? manager.removeItem(at: workspace) }
         let wim = workspace.appendingPathComponent("boot.wim")
         let stagedDisk = workspace.appendingPathComponent(VMRepository.installerDisk)
+        let answer = workspace.appendingPathComponent("Unattend.xml")
+        if let edition { try WindowsUnattend.make(imageIndex: edition).write(to: answer, options: .atomic) }
 
         let sink = InstallerProgressSink(progress: progress)
         let opaque = Unmanaged.passUnretained(sink).toOpaque()
@@ -61,14 +66,10 @@ enum InstallerPreparation {
         let diskResult = iso.withUnsafeFileSystemRepresentation { input in
             stagedDisk.withUnsafeFileSystemRepresentation { destination in
                 wim.withUnsafeFileSystemRepresentation { prepared in
-                    if let drivers {
-                        return drivers.withUnsafeFileSystemRepresentation { directory in
-                            winios_build_installer_disk(input, destination, prepared, directory,
-                                                         installerProgress, opaque, &error, error.count)
-                        }
-                    }
-                    return winios_build_installer_disk(input, destination, prepared, nil, installerProgress,
-                                                        opaque, &error, error.count)
+                    let driverPath = drivers?.path
+                    let answerPath = edition == nil ? nil : answer.path
+                    return winios_build_installer_disk(input, destination, prepared, driverPath, answerPath,
+                                                        installerProgress, opaque, &error, error.count)
                 }
             }
         }

@@ -47,8 +47,12 @@ int main(int argc, char **argv) {
     char error[256] = {0};
     if (argc == 4 && !strcmp(argv[3], "check"))
         return !winios_has_windows_boot_files(argv[1], 2048, 524288);
+    if (argc == 4 && !strcmp(argv[3], "configure"))
+        return winios_configure_installer_answer(argv[1], argv[2]) != 0;
+    if (argc == 4 && !strcmp(argv[3], "disarm"))
+        return winios_configure_installer_answer(argv[1], NULL) != 0;
     if (argc != 3 && argc != 4) return 2;
-    int result = winios_build_installer_disk(argv[1], argv[2], NULL, NULL, progress, argc == 4 ? argv[3] : NULL,
+    int result = winios_build_installer_disk(argv[1], argv[2], NULL, NULL, NULL, progress, argc == 4 ? argv[3] : NULL,
                                              error, sizeof(error));
     if (result) fprintf(stderr, "%s\n", error);
     return result != 0;
@@ -56,7 +60,7 @@ int main(int argc, char **argv) {
 """)
         cls.binary = work / "installer"
         subprocess.run([
-            os.environ.get("CC", "cc"), "-D_DEFAULT_SOURCE", "-D_DARWIN_C_SOURCE", "-std=c11", "-O2",
+            os.environ.get("CC", "cc"), "-D_GNU_SOURCE", "-D_DEFAULT_SOURCE", "-D_DARWIN_C_SOURCE", "-std=c11", "-O2",
             "-I", work, "-I", ROOT / "host", runner, ROOT / "host" / "installer_disk.c",
             Path(FATFS) / "ff.c", Path(FATFS) / "ffunicode.c", UDF_LIBRARY, "-pthread", "-o", cls.binary,
         ], check=True)
@@ -170,6 +174,23 @@ int main(int argc, char **argv) {
         subprocess.run([self.binary, self.output, self.iso, "check"], check=True)
         self.assertEqual(self.output.stat().st_mtime_ns, before)
 
+    def exfat_root_names(self):
+        with self.output.open("rb") as disk:
+            disk.seek(512 * 2 + 160)
+            start = struct.unpack("<Q", disk.read(8))[0]
+            disk.seek(start * 512)
+            boot = disk.read(512)
+            heap = struct.unpack_from("<I", boot, 88)[0]
+            root = struct.unpack_from("<I", boot, 96)[0]
+            sectors_per_cluster = 1 << boot[109]
+            disk.seek((start + heap + (root - 2) * sectors_per_cluster) * 512)
+            directory = disk.read(sectors_per_cluster * 512)
+        names = []
+        for offset in range(0, len(directory), 32):
+            if directory[offset] == 0xc1:
+                names.append(directory[offset + 2:offset + 32].decode("utf-16-le").rstrip("\x00"))
+        return names
+
     @unittest.skipUnless(os.environ.get("WIMLIB_HEADER") and os.environ.get("WIMLIB_LIBRARY")
                          and os.environ.get("WIMLIB_IMAGEX"), "host wimlib is unavailable")
     def test_winpe_patch_and_final_disk_with_real_wim_container(self):
@@ -194,7 +215,7 @@ int main(int argc, char **argv) {
     char error[256] = {0};
     int result = winios_prepare_winpe_wim(argv[1], argv[2], NULL, NULL, error, sizeof(error));
     if (!result)
-        result = winios_build_installer_disk(argv[1], argv[4], argv[3], argv[5], NULL, NULL, error, sizeof(error));
+        result = winios_build_installer_disk(argv[1], argv[4], argv[3], argv[5], argv[6], NULL, NULL, error, sizeof(error));
     if (result) fprintf(stderr, "%s\n", error);
     return result != 0;
 }
@@ -216,13 +237,31 @@ int main(int argc, char **argv) {
         drivers.mkdir()
         for name in ("netkvm.inf", "netkvm.cat", "netkvm.sys"):
             (drivers / name).write_bytes(("test content for " + name).encode())
-        subprocess.run([binary, self.iso, staging, patched, self.output, drivers], check=True)
+        answer = self.work / "answer.xml"
+        answer.write_bytes(b"<unattend>test</unattend>")
+        subprocess.run([binary, self.iso, staging, patched, self.output, drivers, answer], check=True)
         with self.output.open("rb") as disk:
             disk.seek(512 * 2 + 160)
             start, end = struct.unpack("<QQ", disk.read(16))
             disk.seek(start * 512)
             partition = disk.read((end - start + 1) * 512)
         self.assertIn(b"test content for netkvm.sys", partition)
+        self.assertIn(b"<unattend>test</unattend>", partition)
+        target = self.work / "target.img"
+        with target.open("wb") as disk:
+            disk.truncate(64 << 30)
+        actions = [self.binary, self.output, target]
+        subprocess.run([*actions, "configure"], check=True)
+        self.assertIn("WINIOS.AUTO", self.exfat_root_names())
+        subprocess.run([*actions, "disarm"], check=True)
+        self.assertNotIn("WINIOS.AUTO", self.exfat_root_names())
+        subprocess.run([*actions, "configure"], check=True)
+        self.assertIn("WINIOS.AUTO", self.exfat_root_names())
+        with target.open("r+b") as disk:
+            disk.seek(512)
+            disk.write(b"Existing partition data")
+        subprocess.run([*actions, "configure"], check=True)
+        self.assertNotIn("WINIOS.AUTO", self.exfat_root_names())
         self.assertEqual(wim_path.read_bytes(), before)
         subtree = self.work / "reread"
         subprocess.run([

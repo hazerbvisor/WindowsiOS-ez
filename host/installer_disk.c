@@ -328,6 +328,28 @@ static int stage_drivers(InstallerBuild *build, const char *directory, bool copy
     return 0;
 }
 
+static int stage_answer(InstallerBuild *build, const char *answer, bool copying) {
+    if (!answer) return 0;
+    int file = open(answer, O_RDONLY | O_NONBLOCK);
+    struct stat st;
+    if (file < 0 || fstat(file, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 64 << 10) {
+        if (file >= 0) close(file);
+        return fail(build, "The Windows Setup answer file is invalid.");
+    }
+    int result = 0;
+    if (copying) {
+        if ((uint64_t)st.st_size > build->total - build->copied)
+            result = fail(build, "The Setup answer file changed during preparation.");
+        else
+            result = stream_file(build, NULL, file, "1:/WINIOS-SETUP.XML", (uint64_t)st.st_size);
+    } else {
+        build->planned[1] += align_up((uint64_t)st.st_size, PAYLOAD_CLUSTER);
+        build->total += (uint64_t)st.st_size;
+    }
+    close(file);
+    return result;
+}
+
 static int format_partitions(InstallerBuild *build, FATFS *boot, FATFS *payload) {
     MKFS_PARM fat32 = {.fmt = FM_FAT32 | FM_SFD, .n_fat = 2, .au_size = BOOT_CLUSTER};
     MKFS_PARM exfat = {.fmt = FM_EXFAT | FM_SFD, .au_size = PAYLOAD_CLUSTER};
@@ -343,7 +365,7 @@ static int format_partitions(InstallerBuild *build, FATFS *boot, FATFS *payload)
 }
 
 int winios_build_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
-                                const char *driver_directory,
+                                const char *driver_directory, const char *answer_path,
                                 WinIOSInstallerProgress progress, void *context,
                                 char *error, size_t error_size) {
     InstallerBuild build = {.boot_wim_fd = -1, .progress = progress, .context = context, .error = error, .error_size = error_size};
@@ -372,7 +394,8 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
         fail(&build, "The installation ISO has no readable UDF filesystem.");
         goto done;
     }
-    if (walk(&build, root, "", 0, false) || stage_drivers(&build, driver_directory, false)) goto done;
+    if (walk(&build, root, "", 0, false) || stage_drivers(&build, driver_directory, false) ||
+        stage_answer(&build, answer_path, false)) goto done;
     if (build.payloads != 1 || !build.boot_loader || !build.boot_wim || !build.boot_bcd) {
         fail(&build, "The ISO needs an ARM64 EFI loader, boot configuration, WinPE and exactly one install image.");
         goto done;
@@ -413,7 +436,8 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
     }
     if (format_partitions(&build, &boot, &payload)) goto done;
     udfread_rewinddir(root);
-    if (walk(&build, root, "", 0, true) || stage_drivers(&build, driver_directory, true)) goto done;
+    if (walk(&build, root, "", 0, true) || stage_drivers(&build, driver_directory, true) ||
+        stage_answer(&build, answer_path, true)) goto done;
     if (build.copied != build.total || fsync(image_fd)) {
         fail(&build, "The installer disk could not be synced or the source changed during preparation.");
         goto done;
@@ -482,4 +506,67 @@ int winios_has_windows_boot_files(const char *disk_path, uint64_t start, uint64_
     image_readonly = false;
     pthread_mutex_unlock(&volume_lock);
     return found;
+}
+
+
+static uint64_t field_le(const uint8_t *field, unsigned bytes) {
+    uint64_t value = 0;
+    for (unsigned i = 0; i < bytes; ++i) value |= (uint64_t)field[i] << (i * 8);
+    return value;
+}
+
+static bool blank_target(const char *path) {
+    if (!path) return false;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat st;
+    bool blank = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= (64ll << 30) &&
+                 lseek(fd, 0, SEEK_DATA) < 0 && errno == ENXIO;
+    close(fd);
+    return blank;
+}
+
+int winios_configure_installer_answer(const char *installer, const char *primary) {
+    if (!installer) return -1;
+    bool allow = blank_target(primary);
+    pthread_mutex_lock(&volume_lock);
+    image_fd = open(installer, O_RDWR | O_NOFOLLOW | O_NONBLOCK);
+    struct stat info;
+    FATFS payload;
+    FIL marker;
+    FILINFO answer;
+    int result = -1;
+    uint8_t header[SECTOR], table[GPT_TABLE_SECTORS * SECTOR];
+    if (image_fd < 0 || fstat(image_fd, &info) || !S_ISREG(info.st_mode) ||
+        info.st_size < (256ll << 20) ||
+        transfer(image_fd, header, sizeof(header), SECTOR, false) ||
+        memcmp(header, "EFI PART", 8) || field_le(header + 12, 4) != 92 ||
+        field_le(header + 72, 8) != 2 || field_le(header + 80, 4) != 128 ||
+        field_le(header + 84, 4) != 128 ||
+        transfer(image_fd, table, sizeof(table), 2 * SECTOR, false) ||
+        gpt_crc(table, sizeof(table)) != field_le(header + 88, 4)) goto done;
+    uint32_t header_crc = (uint32_t)field_le(header + 16, 4);
+    memset(header + 16, 0, 4);
+    if (header_crc != gpt_crc(header, 92)) goto done;
+    uint64_t start = field_le(table + 160, 8);
+    uint64_t last = field_le(table + 168, 8);
+    uint64_t boot_end = field_le(table + 40, 8);
+    uint64_t sectors = (uint64_t)info.st_size / SECTOR;
+    if (start <= boot_end || start >= sectors || last < start || last >= sectors) goto done;
+    volumes[1] = (InstallerPartition){start, last - start + 1};
+    if (f_mount(&payload, "1:", 1) != FR_OK || f_stat("1:/WINIOS.MEDIA", &answer) != FR_OK) goto done;
+    if (allow && f_stat("1:/WINIOS-SETUP.XML", &answer) == FR_OK && answer.fsize > 0) {
+        if (f_open(&marker, "1:/WINIOS.AUTO", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK ||
+            f_close(&marker) != FR_OK) goto done;
+    } else {
+        FRESULT removed = f_unlink("1:/WINIOS.AUTO");
+        if (removed != FR_OK && removed != FR_NO_FILE) goto done;
+    }
+    result = fsync(image_fd);
+done:
+    f_mount(NULL, "1:", 0);
+    if (image_fd >= 0) close(image_fd);
+    image_fd = -1;
+    pthread_mutex_unlock(&volume_lock);
+    return result;
 }

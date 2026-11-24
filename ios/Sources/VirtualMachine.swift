@@ -44,15 +44,17 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     var name: String
     var hardware: VMHardware
     var installation: Installation
+    var usesTPM: Bool?
     let capacityGiB: Int?
     let mediaID: UUID?
 
     init(id: UUID = UUID(), name: String, hardware: VMHardware = VMHardware(),
-         installation: Installation, capacityGiB: Int? = nil, mediaID: UUID? = nil) {
+         installation: Installation, capacityGiB: Int? = nil, mediaID: UUID? = nil, usesTPM: Bool? = nil) {
         self.id = id
         self.name = name
         self.hardware = hardware
         self.installation = installation
+        self.usesTPM = usesTPM
         self.capacityGiB = capacityGiB
         self.mediaID = mediaID
     }
@@ -88,6 +90,7 @@ struct VMRepository: Sendable {
     static let firmware = "code.fd"
     static let nvram = "vars.fd"
     static let installerDisk = "installer.img"
+    static let tpmState = "TPM"
     static let minimumDiskBytes: UInt64 = 64 << 20
     private static let flashBankBytes: UInt64 = 64 << 20
 
@@ -129,12 +132,15 @@ struct VMRepository: Sendable {
     func createBlank(id: UUID, name: String, hardware: VMHardware, capacityGiB: Int, mediaID: UUID?,
                      code: URL, variables: URL, installer: URL? = nil) throws -> VirtualMachine {
         let machine = VirtualMachine(id: id, name: name, hardware: hardware, installation: .blankDisk,
-                                     capacityGiB: capacityGiB, mediaID: mediaID)
+                                     capacityGiB: capacityGiB, mediaID: mediaID, usesTPM: true)
         if FileManager.default.fileExists(atPath: directory(for: machine).path) {
-            guard try loadManifest(in: directory(for: machine)) == machine else {
+            let existing = try loadManifest(in: directory(for: machine))
+            var updated = existing
+            updated.usesTPM = true
+            guard updated == machine else {
                 throw VMError.message("A different virtual machine already uses this identifier.")
             }
-            return machine
+            return existing
         }
         try publish(machine) { stage in
             try copyFirmware(code: code, variables: variables, to: stage)
@@ -160,11 +166,14 @@ struct VMRepository: Sendable {
         let machine = VirtualMachine(name: original?.name ?? source.lastPathComponent,
                                      hardware: original?.hardware ?? VMHardware(),
                                      installation: original?.installation ?? .preparedDisk,
-                                     capacityGiB: original?.capacityGiB)
+                                     capacityGiB: original?.capacityGiB, usesTPM: original?.usesTPM)
         try publish(machine) { stage in
             try copyMachineFiles(from: source, to: stage, copyDisk: copyDisk)
             if machine.installation == .preparedDisk {
                 try PreparedDisk.validate(stage.appendingPathComponent(Self.rawDisk))
+                if machine.usesTPM == true {
+                    _ = try regularFileSize(stage.appendingPathComponent(Self.tpmState).appendingPathComponent("permall"))
+                }
             }
         }
         return machine
@@ -173,7 +182,7 @@ struct VMRepository: Sendable {
     func duplicate(_ original: VirtualMachine, copyDisk: (URL, URL) throws -> Void) throws -> VirtualMachine {
         let machine = VirtualMachine(name: String(original.name.prefix(95)) + " Copy",
                                      hardware: original.hardware, installation: original.installation,
-                                     capacityGiB: original.capacityGiB, mediaID: original.mediaID)
+                                     capacityGiB: original.capacityGiB, mediaID: original.mediaID, usesTPM: original.usesTPM)
         try publish(machine) { stage in
             try copyMachineFiles(from: directory(for: original), to: stage, copyDisk: copyDisk)
         }
@@ -224,6 +233,31 @@ struct VMRepository: Sendable {
         try copyFirmware(code: source.appendingPathComponent(Self.firmware),
                          variables: source.appendingPathComponent(Self.nvram), to: target)
         try copyDisk(source, target)
+        let state = source.appendingPathComponent(Self.tpmState)
+        if FileManager.default.fileExists(atPath: state.path) {
+            let properties = try state.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard properties.isDirectory == true, properties.isSymbolicLink != true else {
+                throw VMError.message("The TPM state must be a real directory.")
+            }
+            let folder = target.appendingPathComponent(Self.tpmState)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            #if os(iOS)
+            var privateFolder = folder
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try privateFolder.setResourceValues(values)
+            #endif
+            for name in ["permall", "savestate", "volatilestate"] {
+                let input = state.appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: input.path) else { continue }
+                let bytes = try regularFileSize(input)
+                guard bytes > 0 && bytes <= 4 << 20 else {
+                    throw VMError.message("A TPM state file has an invalid size.")
+                }
+                try FileManager.default.copyItem(at: input, to: folder.appendingPathComponent(name))
+            }
+        }
     }
 
     static func validateFirmware(_ source: URL, isVariables: Bool) throws {

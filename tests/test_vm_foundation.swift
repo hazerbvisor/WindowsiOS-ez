@@ -11,7 +11,8 @@ enum VMFoundationTests {
         try machinePreparationAndRecovery()
         try mediaPublication()
         try netKVMDriverValidation()
-        print("7 VM foundation test groups passed")
+        try setupAnswer()
+        print("8 VM foundation test groups passed")
     }
 
     static func presetsAndInvalidInputs() throws {
@@ -210,6 +211,15 @@ enum VMFoundationTests {
             let staged = try Data(contentsOf: destination.appendingPathComponent("netkvm.sys"))
             precondition(staged == binary)
         }
+    }
+
+    static func setupAnswer() throws {
+        try rejects { _ = try WindowsUnattend.make(imageIndex: 0) }
+        let bytes = try WindowsUnattend.make(imageIndex: 6)
+        let xml = String(decoding: bytes, as: UTF8.self)
+        precondition(xml.contains("<Key>/IMAGE/INDEX</Key><Value>6</Value>"))
+        precondition(xml.contains("<WillWipeDisk>false</WillWipeDisk>"))
+        precondition(!xml.contains("UserAccounts") && !xml.contains("AcceptEula") && !xml.contains("Bypass"))
     }
 
     static func makeFirmware(isVariables: Bool, at url: URL) throws {

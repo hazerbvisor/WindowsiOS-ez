@@ -36,10 +36,12 @@ private struct MachineLibraryView: View {
     @State private var export: VMExport?
     @State private var showSession = false
     @State private var showAssistant = false
+    @State private var setupAfterAssistant: VirtualMachine?
     @State private var showImporter = false
     @State private var busy = false
     @State private var hasLegacy = false
     @State private var error: String?
+    @State private var localBackup: String?
     @Environment(\.scenePhase) private var scenePhase
 
     private let repo = VMFiles.repository
@@ -132,8 +134,8 @@ private struct MachineLibraryView: View {
                     refresh()
                 }
             }
-            .sheet(isPresented: $showAssistant, onDismiss: refresh) {
-                InstallationAssistant(vm: vm)
+            .sheet(isPresented: $showAssistant, onDismiss: closeAssistant) {
+                InstallationAssistant(vm: vm) { setupAfterAssistant = $0 }
             }
             .sheet(item: $export, onDismiss: cleanExports) { item in
                 FolderExporter(url: item.folder)
@@ -172,6 +174,13 @@ private struct MachineLibraryView: View {
                 }
             } message: { _ in
                 Text("Continue after Windows Setup has finished and the guest has shut down. The primary disk is checked for ARM64 Windows boot files before switching.")
+            }
+            .alert("Local Backup Saved", isPresented: Binding(
+                get: { localBackup != nil }, set: { if !$0 { localBackup = nil } }
+            )) {
+                Button("OK", role: .cancel) { localBackup = nil }
+            } message: {
+                Text(localBackup ?? "")
             }
             .alert("Virtual Machine Files", isPresented: errorPresented) {
                 Button("OK", role: .cancel) { error = nil }
@@ -236,7 +245,8 @@ private struct MachineLibraryView: View {
                     doFileWork { _ = try repo.duplicate(machine, copyDisk: VMFiles.copyDisk) }
                 }
                 .disabled(sessionBusy)
-                Button("Export to Files", systemImage: "square.and.arrow.up") { exportMachine(machine) }
+                Button(shouldKeepBackupLocal(machine) ? "Save Local VM Backup" : "Export to Files",
+                       systemImage: "square.and.arrow.up") { exportMachine(machine) }
                     .disabled(sessionBusy)
                 Button("Delete", systemImage: "trash", role: .destructive) { deleteCandidate = machine }
                     .disabled(sessionBusy)
@@ -250,11 +260,20 @@ private struct MachineLibraryView: View {
         .padding(.vertical, 5)
     }
 
+    private func closeAssistant() {
+        refresh()
+        if let machine = setupAfterAssistant {
+            setupAfterAssistant = nil
+            let installer = repo.directory(for: machine).appendingPathComponent(VMRepository.installerDisk)
+            start(machine, installer: installer)
+        }
+    }
+
     private func start(_ machine: VirtualMachine?, installer: URL? = nil) {
         guard !sessionBusy, !busy, !vm.needsRelaunchToStart else { return }
         activeMachine = machine
         vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
-                installer: installer)
+                installer: installer, useTPM: machine?.usesTPM == true)
         showSession = true
     }
 
@@ -273,6 +292,11 @@ private struct MachineLibraryView: View {
             try InstallerPreparation.verifyWindowsBootFiles(disk)
             var installed = machine
             installed.installation = .preparedDisk
+            let state = folder.appendingPathComponent(VMRepository.tpmState).appendingPathComponent("permall")
+            if installed.usesTPM == true || FileManager.default.fileExists(atPath: state.path) {
+                _ = try regularFileSize(state)
+                installed.usesTPM = true
+            }
             try repository.update(installed)
             if removeInstaller {
                 let installer = folder.appendingPathComponent(VMRepository.installerDisk)
@@ -310,23 +334,43 @@ private struct MachineLibraryView: View {
 
     private static var exportDirectory: URL { URL.temporaryDirectory.appendingPathComponent("VMExport") }
 
+    private func shouldKeepBackupLocal(_ machine: VirtualMachine) -> Bool {
+        machine.usesTPM == true || FileManager.default.fileExists(
+            atPath: repo.directory(for: machine).appendingPathComponent(VMRepository.tpmState).path
+        )
+    }
+
     private func exportMachine(_ machine: VirtualMachine) {
         guard !busy, !sessionBusy else { return }
         busy = true
-        let workspace = Self.exportDirectory
+        let local = shouldKeepBackupLocal(machine)
+        let backupID = UUID().uuidString
+        let workspace = local
+            ? URL.documentsDirectory.appendingPathComponent("Local Backups").appendingPathComponent(backupID)
+            : Self.exportDirectory
         let repository = repo
         Task {
             defer { busy = false }
             do {
                 let folder = try await Task.detached(priority: .userInitiated) {
                     let fileManager = FileManager.default
-                    try? fileManager.removeItem(at: workspace)
+                    if !local { try? fileManager.removeItem(at: workspace) }
                     try fileManager.createDirectory(at: workspace, withIntermediateDirectories: true)
+                    if local {
+                        var localFolder = workspace
+                        var values = URLResourceValues()
+                        values.isExcludedFromBackup = true
+                        try localFolder.setResourceValues(values)
+                    }
                     return try repository.export(machine, to: workspace, copyDisk: VMFiles.exportDisk)
                 }.value
-                export = VMExport(folder: folder)
+                if local {
+                    localBackup = "Find the VM in Files under On My iPhone or On My iPad → WindowsiOS-ez → Local Backups → \(backupID). Its TPM state is part of the local backup."
+                } else {
+                    export = VMExport(folder: folder)
+                }
             } catch {
-                cleanExports()
+                if local { try? FileManager.default.removeItem(at: workspace) } else { cleanExports() }
                 self.error = error.localizedDescription
             }
         }

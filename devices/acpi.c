@@ -207,7 +207,7 @@ static void aml_crs_mem32_irq(Buf *crs, uint32_t base, uint32_t len, uint32_t gs
     b_u8(crs, 0x00);
 }
 
-static void build_dsdt(Buf *tabs, int ncpus) {
+static void build_dsdt(Buf *tabs, int ncpus, uint32_t tpm_address) {
     size_t start = tabs->len;
     acpi_hdr(tabs, "DSDT", 0, 2, "WINVIRT ");
 
@@ -245,6 +245,17 @@ static void build_dsdt(Buf *tabs, int ncpus) {
         aml_crs_mem32_irq(&crs, 0x09020000U, 0x18U, 0, 0, 0, 0);
         aml_name_buf(&dev, "_CRS", crs.buf, crs.len);
         aml_device(&sb, "FWCF", &dev);
+        free(crs.buf);
+        free(dev.buf);
+    }
+
+    if (tpm_address) {
+        Buf dev = {0}, crs = {0};
+        aml_name_str(&dev, "_HID", "MSFT0101");
+        aml_name_int(&dev, "_STA", 0x0f);
+        aml_crs_mem32_irq(&crs, tpm_address, 0x5000, 0, 0, 0, 0);
+        aml_name_buf(&dev, "_CRS", crs.buf, crs.len);
+        aml_device(&sb, "TPM0", &dev);
         free(crs.buf);
         free(dev.buf);
     }
@@ -890,7 +901,7 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
     free(t.buf);
 }
 
-void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count) {
+void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count, uint32_t tpm_address) {
     Buf tabs = {0};
     Loader ldr = {0};
 
@@ -898,13 +909,14 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     loader_alloc(&ldr, "etc/acpi/tables", 64, 1); /* Zone 1 = HIGH */
 
     /* 1. DSDT at offset 0 */
-    build_dsdt(&tabs, ncpus);
+    build_dsdt(&tabs, ncpus, tpm_address);
     uint32_t dsdt_len = (uint32_t)tabs.len;
     loader_add_cksum(&ldr, "etc/acpi/tables", 9, 0, dsdt_len);
 
     /* 2. Subtables referenced by XSDT */
-    size_t tbl_offs[8];
-    uint32_t tbl_lens[8];
+    size_t tbl_offs[9];
+    uint32_t tbl_lens[9];
+    int table_count = 8;
     uint32_t facp_xdsdt_ptr_off = 0;
 
     tbl_offs[0] = build_facp(&tabs, 0, &facp_xdsdt_ptr_off);
@@ -933,14 +945,27 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     tbl_offs[7] = build_iort(&tabs);
     tbl_lens[7] = (uint32_t)(tabs.len - tbl_offs[7]);
 
-    for (int i = 1; i < 8; i++) {
+    if (tpm_address) {
+        size_t at = tabs.len;
+        acpi_hdr(&tabs, "TPM2", 0, 4, "WINVIRT ");
+        b_u16(&tabs, 0); /* client platform */
+        b_u16(&tabs, 0);
+        b_u64(&tabs, 0); /* FIFO has no CRB control area */
+        b_u32(&tabs, 6); /* memory-mapped TIS start method */
+        finalize_table(&tabs, at);
+        tbl_offs[8] = at;
+        tbl_lens[8] = (uint32_t)(tabs.len - at);
+        table_count++;
+    }
+
+    for (int i = 1; i < table_count; i++) {
         loader_add_cksum(&ldr, "etc/acpi/tables", (uint32_t)tbl_offs[i] + 9, (uint32_t)tbl_offs[i], tbl_lens[i]);
     }
 
     /* 3. XSDT */
     size_t xsdt_off = tabs.len;
     acpi_hdr(&tabs, "XSDT", 0, 1, "WINVIRT ");
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < table_count; i++) {
         uint32_t ptr_off = (uint32_t)tabs.len;
         b_u64(&tabs, (uint64_t)tbl_offs[i]);
         loader_add_ptr(&ldr, "etc/acpi/tables", "etc/acpi/tables", ptr_off, 8);

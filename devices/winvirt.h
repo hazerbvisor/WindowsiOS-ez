@@ -34,6 +34,7 @@
 #define WINVIRT_RTC_PA        0x09010000ULL
 #define WINVIRT_FW_CFG_PA     0x09020000ULL
 #define WINVIRT_GPIO_PA       0x09030000ULL
+#define WINVIRT_TPM_PA        0x0c000000ULL
 #define WINVIRT_GED_PA        0x09080000ULL
 #define WINVIRT_PCIE_MMIO_PA  0x10000000ULL
 #define WINVIRT_PCIE_MMIO_SZ  0x2eff0000ULL
@@ -52,6 +53,8 @@
 #define WINVIRT_INTID_GED     (32 + 9) /* GSI 41 */
 #define WINVIRT_MSI_BASE      80       /* INTIDs 80..143 (64 MSI-X vectors) */
 #define WINVIRT_MSI_COUNT     64
+
+struct WinIOSTpm;
 
 typedef struct HvWinVirt {
     HvMachine *m;
@@ -79,6 +82,7 @@ typedef struct HvWinVirt {
     HvXhci *usb;
     HvHda *hda;
     HvVirtioSnd *snd;
+    struct WinIOSTpm *tpm;
 
     uint32_t ged_events;
     void (*poll)(void);
@@ -87,8 +91,11 @@ typedef struct HvWinVirt {
 uint8_t *hv_alloc_no_footprint(uint64_t size);
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound);
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      const char *tpm_state_directory);
 void hv_winvirt_reset_cpu(HvWinVirt *b);
+int hv_winvirt_reset_tpm(HvWinVirt *b);
+void hv_winvirt_close_tpm(HvWinVirt *b);
 void hv_winvirt_power_button(HvWinVirt *b);
 
 #endif

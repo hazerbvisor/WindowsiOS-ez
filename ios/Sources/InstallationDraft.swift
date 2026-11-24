@@ -26,6 +26,7 @@ struct InstallationDraft: Codable, Equatable {
     var hardware = VMHardware()
     var capacityGiB = 64
     var mediaID: UUID?
+    var editionIndex: Int?
     var driverID: UUID?
     var lastError: String?
 
@@ -63,7 +64,8 @@ struct InstallationDraftStore: Sendable {
 
     func installerURL(for draft: InstallationDraft, media: UUID) -> URL {
         let drivers = draft.driverID?.uuidString ?? "no-drivers"
-        return root.appendingPathComponent("Installer-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers).img")
+        let edition = draft.editionIndex.map(String.init) ?? "manual"
+        return root.appendingPathComponent("Installer-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
     }
 
     func driversURL(for id: UUID) -> URL {

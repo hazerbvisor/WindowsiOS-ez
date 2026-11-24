@@ -42,9 +42,10 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)needsSparseUnpack;
 - (void)prepareAndStartInDirectory:(nullable NSString *)directory
                          installer:(nullable NSString *)installer
+                             useTPM:(BOOL)useTPM
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
-                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:ramMiB:jitMiB:cpus:));
+                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:useTPM:ramMiB:jitMiB:cpus:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
