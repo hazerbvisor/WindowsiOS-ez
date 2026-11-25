@@ -50,21 +50,7 @@ jobs:
           dest="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$WINIOS_GPU_PREBUILT_PREFIX/lib/libvirglrenderer.dylib")"
           cp "$lib" "$dest"
           xcrun lipo -verify_arch arm64 "$dest"
-          xcrun vtool -show-build "$dest" | grep -Eq 'platform IOS
-        run: |
-          python3 -m unittest discover -s tests -p test_virtio_gpu.py
-          cc -std=c11 -Wall -Wextra -Werror tests/test_gpu_modes.c -o "$RUNNER_TEMP/gpu-modes"
-          "$RUNNER_TEMP/gpu-modes"
-      - name: Compile WindowsiOS and package precompiled GPU frameworks
-        run: bash scripts/build_unsigned_ipa.sh
-      - name: Upload verified lab IPA
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: WindowsiOS-ez-MetalGPU-ShmemFix-unsigned
-          path: build/artifacts/metalgpu-lab/
-          if-no-files-found: error
-          retention-days: 7
-
+          xcrun vtool -show-build "$dest" | grep -Eq 'platform IOS$'
       - name: Check existing VirtIO GPU regressions
         run: |
           python3 -m unittest discover -s tests -p test_virtio_gpu.py
