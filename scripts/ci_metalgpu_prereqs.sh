@@ -16,6 +16,10 @@ from pathlib import Path
 p=Path("scripts/build_dependencies.sh")
 s=p.read_text()
 s=s.replace('IOS_SDKMINVER="15.0"', 'IOS_SDKMINVER="17.0"')
+# Preserve the workflow-selected Xcode when upstream sanitizes its environment.
+old = 'env -i PATH=$PATH xcodebuild archive'
+assert s.count(old) == 1
+s=s.replace(old, 'env -i PATH="$PATH" DEVELOPER_DIR="$DEVELOPER_DIR" HOME="$HOME" xcodebuild archive')
 a=s.index("\ncheck_env\necho")
 # The original script has completed target, toolchain and environment setup here.
 # The selected dependency build uses its original pinned source and patches.
@@ -23,6 +27,9 @@ s=s[:a]+'''
 mkdir -p "$BUILD_DIR" "$PREFIX/include" "$PREFIX/lib" "$PREFIX/Frameworks"
 download $PKG_CONFIG_SRC
 clone $WEBKIT_REPO $WEBKIT_COMMIT "$WEBKIT_SUBDIRS"
+# The pinned WebKit configuration uses a removed libc++ macro.
+# Preserve hardening rather than disable assertions to get a build.
+python3 "$ROOT/scripts/patch_angle_xcode27.py" "$BUILD_DIR/WebKit.git"
 clone $EPOXY_REPO $EPOXY_COMMIT
 download $LLVM15_SRC
 copy_private_headers

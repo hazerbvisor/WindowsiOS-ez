@@ -1,4 +1,5 @@
 name: One-off MetalGPU lab IPA
+# Retry with Xcode 27.2 selection preserved and libc++ hardening migrated.
 on:
   push:
     branches: [build/metalgpu-cd413b7]
