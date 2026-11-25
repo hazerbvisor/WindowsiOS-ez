@@ -1,7 +1,7 @@
-name: Experimental MetalGPU SMP 10GiB IPA
+name: MetalGPU protocol compatibility IPA
 on:
   push:
-    branches: [build/metalgpu-smp]
+    branches: [build/metalgpu-protocol-fix]
     paths: [.github/workflows/one-off-metalgpu.yml]
 permissions:
   contents: read
@@ -40,7 +40,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-SMP-10GiB-unsigned
+          name: WindowsiOS-ez-MetalGPU-ProtocolFix-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

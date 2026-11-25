@@ -54,6 +54,8 @@ bool hv_neptune_blob_exists(HvNeptune *n, uint32_t resource);
 int hv_neptune_reset(HvNeptune *n);
 /* Retained Metal texture handle, released through the renderer before its teardown. */
 void *hv_neptune_scanout_texture(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height,uint32_t format,uint32_t stride,uint32_t offset);
+void *hv_neptune_typed_scanout(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height);
+unsigned hv_neptune_resource_count(HvNeptune *n,uint64_t *bytes);
 void hv_neptune_scanout_release(HvNeptune *n,void *texture);
 int hv_neptune_aperture_access(HvNeptune *n, uint64_t offset, void *data, size_t bytes, bool write);
 int hv_neptune_fence_submit(HvNeptune *n, uint32_t context, uint32_t ring, uint64_t guest_id, uint64_t *ticket);

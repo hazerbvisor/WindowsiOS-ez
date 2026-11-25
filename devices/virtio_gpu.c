@@ -61,6 +61,7 @@ typedef struct Cursor {
  * fence completes. No callback thread touches guest memory or used rings. */
 typedef struct NeptuneReply {
     uint64_t ticket;
+    uint32_t opcode;
     HvVirtqElem elem;
     uint32_t bytes;
     uint8_t response[24];
@@ -77,6 +78,7 @@ struct HvVirtioGpu {
     size_t allocated;
     bool pending[QUEUES];
     uint64_t completed[QUEUES], malformed, command_errors, publishes, resets;
+    struct { uint32_t opcode, response, flags, context, length; uint64_t count; } errors[16];
 #ifdef WINIOS_ENABLE_NEPTUNE
     HvNeptune *neptune;
     pthread_t neptune_owner;
@@ -318,6 +320,22 @@ static uint32_t flush(HvVirtioGpu *gpu, const Resource *res, const Rect *rect) {
     return OK_NODATA;
 }
 
+static void record_error(HvVirtioGpu *gpu,const Header *hdr,uint32_t response,uint64_t length) {
+    if (response<ERR_UNSPEC) return;
+    gpu->command_errors++;
+    for (unsigned i=0;i<16;++i) {
+        if (!gpu->errors[i].count || (gpu->errors[i].opcode==hdr->type && gpu->errors[i].response==response)) {
+            gpu->errors[i].opcode=hdr->type;
+            gpu->errors[i].response=response;
+            gpu->errors[i].flags=hdr->flags;
+            gpu->errors[i].context=hdr->context;
+            gpu->errors[i].length=(uint32_t)length;
+            gpu->errors[i].count++;
+            break;
+        }
+    }
+}
+
 static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
     struct { Header hdr; uint8_t body[32]; } req = {0};
     union { Header hdr; DisplayInfo display; EdidReply edid; } reply = {0};
@@ -391,7 +409,7 @@ static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
         break;
     }
 done:
-    if (reply.hdr.type >= ERR_UNSPEC) gpu->command_errors++;
+    record_error(gpu,&req.hdr,reply.hdr.type,segment_capacity(elem,0));
     return hv_virtq_write(&gpu->vio, elem, 0, &reply, bytes);
 }
 
@@ -451,8 +469,23 @@ static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
     response.type=ERR_PARAMETER;
     uint32_t body[18]={0};
     uint64_t got=segment_capacity(elem,0);
-    if (hdr->flags || hdr->context) goto out;
-    if (hdr->type==0x10d) {
+    if ((hdr->flags&~FENCE) || hdr->context) goto out;
+    if (hdr->type==SET_SCANOUT) {
+        if (got!=sizeof(Header)+24 ||
+            hv_virtq_read(&gpu->vio,elem,sizeof(Header),body,24)!=24) goto out;
+        if (body[4]) { response.type=ERR_SCANOUT; goto out; }
+        if (!body[5]) { clear_scanout(gpu); response.type=OK_NODATA; goto out; }
+        if (body[0] || body[1] || !body[2] || !body[3]) goto out;
+        void *tex=hv_neptune_typed_scanout(gpu->neptune,body[5],body[2],body[3]);
+        if (!tex) { response.type=ERR_UNSPEC; goto out; }
+        clear_scanout(gpu);
+        gpu->native_texture=tex;
+        gpu->native_resource=body[5];
+        gpu->native_width=body[2]; gpu->native_height=body[3];
+        hv_fb_display_set_native(gpu->fb,tex,body[2],body[3]);
+        gpu->publishes++;
+        response.type=OK_NODATA;
+    } else if (hdr->type==0x10d) {
         /* SET_SCANOUT_BLOB: rect, scanout, resource, width/height, format,
          * padding, four strides and four offsets. Initially full-frame only. */
         if (got!=sizeof(Header)+sizeof(body) ||
@@ -468,6 +501,7 @@ static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
         gpu->native_resource=body[5];
         gpu->native_width=body[6]; gpu->native_height=body[7];
         hv_fb_display_set_native(gpu->fb,tex,body[6],body[7]);
+        gpu->publishes++;
         response.type=OK_NODATA;
     } else if (hdr->type==RESOURCE_FLUSH) {
         if (got!=sizeof(Header)+24 ||
@@ -480,15 +514,23 @@ static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
         response.type=OK_NODATA;
     }
 out:
-    if (response.type>=ERR_UNSPEC) gpu->command_errors++;
+    record_error(gpu,hdr,response.type,got);
     return hv_virtq_write(&gpu->vio,elem,0,&response,sizeof(response));
 }
 
-static uint32_t neptune_backing_command(HvVirtioGpu *gpu,const HvVirtqElem *elem,const Header *hdr) {
+static uint32_t neptune_backing_command(HvVirtioGpu *gpu,const HvVirtqElem *elem,const Header *hdr,bool *deferred) {
     Header response=*hdr; response.type=ERR_PARAMETER;
     uint32_t body[12]={0};
     uint64_t length=segment_capacity(elem,0);
-    if (hdr->flags&~FENCE || segment_capacity(elem,1)<sizeof(response)) return 0;
+    if (segment_capacity(elem,1)<sizeof(response)) return 0;
+    bool transfer3d=hdr->type==0x205 || hdr->type==0x206;
+    if ((hdr->flags&~(FENCE|2u)) || ((hdr->flags&2u) && (!(hdr->flags&FENCE) || !hdr->context || !transfer3d)) ||
+        (!(hdr->flags&2u) && hdr->ring)) goto done;
+    NeptuneReply *slot=NULL;
+    if (transfer3d && (hdr->flags&FENCE)) {
+        for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) if (!gpu->deferred[i].ticket) { slot=&gpu->deferred[i]; break; }
+        if (!slot) { response.type=ERR_OOM; goto done; }
+    }
     if (hdr->type==RESOURCE_ATTACH_BACKING) {
         if (length<32 || hv_virtq_read(&gpu->vio,elem,24,body,8)!=8 ||
             !body[1] || body[1]>8192 || length!=32+(uint64_t)body[1]*16) goto done;
@@ -520,7 +562,20 @@ static uint32_t neptune_backing_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
             response.type=OK_NODATA;
     }
 done:
-    if (response.type>=ERR_UNSPEC) gpu->command_errors++;
+    if (response.type==OK_NODATA && transfer3d && (hdr->flags&FENCE)) {
+        uint64_t ticket=0;
+        int rc=(hdr->flags&2u)?
+            hv_neptune_fence_submit(gpu->neptune,hdr->context,hdr->ring,hdr->fence,&ticket):
+            hv_neptune_fence_submit_legacy(gpu->neptune,hdr->context,hdr->fence,&ticket);
+        if (!rc && ticket && slot) {
+            slot->ticket=ticket; slot->opcode=hdr->type; slot->elem=*elem;
+            slot->bytes=sizeof(response); memcpy(slot->response,&response,sizeof(response));
+            *deferred=true; gpu->neptune_submits++;
+            return 0;
+        }
+        response.type=ERR_UNSPEC;
+    }
+    record_error(gpu,hdr,response.type,length);
     return hv_virtq_write(&gpu->vio,elem,0,&response,sizeof(response));
 }
 
@@ -532,7 +587,14 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
     if (hdr.type==RESOURCE_ATTACH_BACKING || hdr.type==RESOURCE_DETACH_BACKING || hdr.type==TRANSFER_TO_HOST_2D || hdr.type==0x205 || hdr.type==0x206) {
         uint32_t id=0,offset=hdr.type==TRANSFER_TO_HOST_2D?48:(hdr.type==0x205 || hdr.type==0x206)?56:24;
         if (hv_virtq_read(v,elem,offset,&id,4)==4 && hv_neptune_blob_exists(gpu->neptune,id)) {
-            *written=neptune_backing_command(gpu,elem,&hdr); return true;
+            *written=neptune_backing_command(gpu,elem,&hdr,deferred); return true;
+        }
+    }
+    if (hdr.type==SET_SCANOUT) {
+        uint32_t id=0;
+        if (hv_virtq_read(v,elem,sizeof(hdr)+20,&id,4)==4 &&
+            ((id && hv_neptune_blob_exists(gpu->neptune,id)) || (!id && gpu->native_resource))) {
+            *written=neptune_scanout_command(gpu,elem,&hdr); return true;
         }
     }
     if (hdr.type==0x10d) {
@@ -558,7 +620,7 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
         uint32_t id=0;
         if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4)
             route=hv_neptune_blob_exists(gpu->neptune,id);
-        if (route && id==gpu->native_resource) clear_scanout(gpu);
+        /* Clear only after successful unref (see below). */
     }
     if (!route) return false;
     uint64_t length=segment_capacity(elem,0), capacity=segment_capacity(elem,1);
@@ -599,6 +661,7 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
         /* Currently only SUBMIT can defer, whose response is a header. */
         if (n!=sizeof(Header)) { v->status|=64; return true; }
         slot->ticket=ticket;
+        slot->opcode=hdr.type;
         slot->elem=*elem;
         slot->bytes=(uint32_t)n;
         memcpy(slot->response,reply,n);
@@ -606,7 +669,11 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
         gpu->neptune_submits++;
     } else if (n) {
         uint32_t type=0; memcpy(&type,reply,4);
-        if (type>=ERR_UNSPEC) gpu->command_errors++;
+        record_error(gpu,&hdr,type,length);
+        if (type==OK_NODATA && hdr.type==RESOURCE_UNREF && gpu->native_resource) {
+            uint32_t id=0;
+            if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4 && id==gpu->native_resource) clear_scanout(gpu);
+        }
         *written=hv_virtq_write(v,elem,0,reply,(uint32_t)n);
     }
     return true;
@@ -626,7 +693,8 @@ static void neptune_retire(HvVirtioGpu *gpu) {
         if (result<0 || fence.context!=response.context || fence.ring!=response.ring || fence.guest_id!=response.fence) {
             response.type=ERR_UNSPEC;
             memcpy(p->response,&response,sizeof(response));
-            gpu->command_errors++;
+            Header failed=response; failed.type=p->opcode;
+            record_error(gpu,&failed,ERR_UNSPEC,0);
         }
         uint32_t written=hv_virtq_write(&gpu->vio,&p->elem,0,p->response,p->bytes);
         hv_virtq_push(&gpu->vio,0,&p->elem,written);
@@ -807,6 +875,11 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
     unsigned resources = 0;
     for (unsigned i = 0; i < RESOURCES; i++) resources += gpu->resources[i].id != 0;
     size_t frame = (size_t)gpu->screen.rect.width * gpu->screen.rect.height * 4;
+    const char *display=gpu->screen.front ? "virtio-scanout" : "RAMFB";
+    uint32_t width=gpu->screen.rect.width,height=gpu->screen.rect.height;
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (gpu->native_texture) { display="Metal-native"; width=gpu->native_width; height=gpu->native_height; }
+#endif
     snprintf(buffer, capacity,
              "graphics: adapter=%s display=%s status=0x%02x features=0x%" PRIx64
              " scanout=%ux%u host_cpu_bytes=%zu resources=%u\n"
@@ -819,8 +892,23 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
 #else
              "VirtIO-GPU-2D",
 #endif
-             gpu->screen.front ? "virtio-scanout" : "RAMFB", (unsigned)gpu->vio.status, gpu->vio.driver_features,
-             gpu->screen.rect.width, gpu->screen.rect.height, gpu->allocated + 2 * frame, resources,
+             display, (unsigned)gpu->vio.status, gpu->vio.driver_features,
+             width, height, gpu->allocated + 2 * frame, resources,
              gpu->completed[0], gpu->completed[1], (unsigned)gpu->pending[0], (unsigned)gpu->pending[1],
              gpu->malformed, gpu->command_errors, gpu->publishes, gpu->resets);
+    size_t used=strlen(buffer);
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (gpu->neptune && used<capacity) {
+        uint64_t bytes=0; unsigned count=hv_neptune_resource_count(gpu->neptune,&bytes);
+        int n=snprintf(buffer+used,capacity-used,"neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 "\n",
+            count,bytes,gpu->neptune_submits,gpu->neptune_completed);
+        if (n>0) used+=(size_t)n;
+    }
+#endif
+    for (unsigned i=0;i<16 && used<capacity;++i) if (gpu->errors[i].count) {
+        int n=snprintf(buffer+used,capacity-used,"gpu_error: op=%04x resp=%04x count=%" PRIu64 " flags=%x ctx=%u len=%u\n",
+            gpu->errors[i].opcode,gpu->errors[i].response,gpu->errors[i].count,
+            gpu->errors[i].flags,gpu->errors[i].context,gpu->errors[i].length);
+        if (n>0) used+=(size_t)n;
+    }
 }

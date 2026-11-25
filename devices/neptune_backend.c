@@ -20,7 +20,7 @@ typedef struct Blob {
     uint64_t bytes, offset;
     void *map;
     uint64_t mapped_bytes;
-    uint32_t width,height,bpp,target,entry_count;
+    uint32_t width,height,bpp,target,format,entry_count;
     HvNptBacking *entries;
     uint8_t *backing;
     uint64_t backing_bytes;
@@ -101,7 +101,7 @@ static void context_fence(void *cookie, uint32_t context, uint32_t ring, uint64_
     pthread_mutex_lock(&n->mutex);
     for (size_t i=0; i<HV_NPT_MAX_FENCES; ++i) {
         Pending *p=&n->pending[i];
-        if (p->fence.ticket==ticket && p->fence.context==context && p->fence.ring==ring) {
+        if (p->fence.ticket && !p->legacy && p->fence.guest_id==ticket && p->fence.context==context && p->fence.ring==ring) {
             p->done=true;
             break;
         }
@@ -240,7 +240,7 @@ int hv_neptune_create_3d(HvNeptune *n,const uint32_t a[11]) {
             .height=a[5],.depth=a[6],.array_size=a[7],.last_level=a[8],.nr_samples=a[9],.flags=a[10]
         };
         if (n->virgl_renderer_resource_create(&args,NULL,0)) return -1;
-        n->blobs[i]=(Blob){.id=a[0],.bytes=bytes,.width=a[4],.height=a[5],.bpp=bpp,.target=a[1]};
+        n->blobs[i]=(Blob){.id=a[0],.bytes=bytes,.width=a[4],.height=a[5],.bpp=bpp,.target=a[1],.format=a[2]};
         n->allocated+=bytes;
         return 0;
     }
@@ -295,8 +295,9 @@ int hv_neptune_blob_unmap(HvNeptune *n,uint32_t resource) {
     /* Remove accessibility first. The caller must quiesce normal-memory
      * guest mappings before calling this API; currently only scalar accesses
      * through the serialized host aperture are supported. */
+    if (n->virgl_renderer_resource_unmap(resource)) return -1;
     b->map=NULL; b->offset=0; b->mapped_bytes=0;
-    return n->virgl_renderer_resource_unmap(resource) ? -1 : 0;
+    return 0;
 }
 
 /* Use host-owned bounce backing rather than exposing arbitrary guest RAM to
@@ -385,6 +386,20 @@ void *hv_neptune_scanout_texture(HvNeptune *n,uint32_t resource,uint32_t width,u
     }
     return handle;
 }
+/* Typed VirGL resources carry a retained native Metal texture when
+ * allocated with the scanout bind. Pinned virglrenderer explicitly supports
+ * this case in create_handle_for_scanout, not just SHM blobs. */
+void *hv_neptune_typed_scanout(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height) {
+    Blob *b=n?blob(n,resource):NULL;
+    if (!b || b->target!=2 || b->bpp!=4 || width!=b->width || height!=b->height) return NULL;
+    return hv_neptune_scanout_texture(n,resource,width,height,b->format,width*4,0);
+}
+unsigned hv_neptune_resource_count(HvNeptune *n,uint64_t *bytes) {
+    unsigned count=0;
+    if (bytes) *bytes=n?n->allocated:0;
+    if (n) for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) count+=n->blobs[i].id!=0;
+    return count;
+}
 void hv_neptune_scanout_release(HvNeptune *n,void *texture) {
     if (n && texture) n->virgl_renderer_release_handle_for_scanout(VIRGL_NATIVE_HANDLE_METAL_TEXTURE,texture);
 }
@@ -444,14 +459,21 @@ int hv_neptune_fence_submit(HvNeptune *n,uint32_t context,uint32_t ring,uint64_t
     pthread_mutex_lock(&n->mutex);
     if (n->next_ticket==UINT64_MAX) { pthread_mutex_unlock(&n->mutex); return -1; }
     Pending *p=NULL;
-    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) if (!n->pending[i].fence.ticket) { p=&n->pending[i]; break; }
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) {
+        Pending *candidate=&n->pending[i];
+        if (candidate->fence.ticket && !candidate->legacy && candidate->fence.context==context &&
+            candidate->fence.ring==ring && candidate->fence.guest_id==guest_id) {
+            pthread_mutex_unlock(&n->mutex); return -1;
+        }
+        if (!candidate->fence.ticket && !p) p=candidate;
+    }
     if (!p) { pthread_mutex_unlock(&n->mutex); return -1; }
     uint64_t id=++n->next_ticket;
     *p=(Pending){.fence={.context=context,.ring=ring,.guest_id=guest_id,.ticket=id}};
     pthread_mutex_unlock(&n->mutex);
-    /* No MERGEABLE: each opaque host ticket has an exact completion.
-     * Register before submission, which can synchronously invoke callback. */
-    if (n->virgl_renderer_context_create_fence(context,0,ring,id)) {
+    /* Neptune ARM_EVENT_FENCE pairs the actual wire fence ID, not our
+     * private descriptor ticket. Reserve before a synchronous callback. */
+    if (n->virgl_renderer_context_create_fence(context,0,ring,guest_id)) {
         pthread_mutex_lock(&n->mutex); *p=(Pending){0}; pthread_mutex_unlock(&n->mutex);
         return -1;
     }

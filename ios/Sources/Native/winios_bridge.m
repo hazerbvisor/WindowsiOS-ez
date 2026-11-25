@@ -795,7 +795,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         (long)hingeStatus,
         hingeDeg,
         pt.width, pt.height, scale];
-    char graphics[1024];
+    char graphics[4096];
     hv_winvm_graphics_diagnostics(graphics, sizeof graphics);
     NSString *graphicsStatus = [NSString stringWithUTF8String:graphics] ?: @"";
     NSString *report = [NSString stringWithFormat:@"%@%@%@", txt, graphicsStatus, storageStatus];

@@ -67,3 +67,5 @@ Added saved per-VM guest-resolution presets for 11/13-inch iPads and common PC r
 Experimental SMP lab candidate: removed 1-vCPU gate, protected GPU aperture lifetime and routed GPU queues/resets to CPU0. Device validation outstanding. No USB changes.
 
 Experimental 10 GiB configured budget: 7.5 GiB guest RAM, 1.5 GiB JIT, 1 GiB Neptune tracked allocation limit, selectable 1–8 vCPUs. Both existing memory entitlements preserved. Physical iPad validation pending.
+
+MetalGPU compatibility candidate: native typed scanout, exact guest context-fence identity, deferred 3D transfer completion, per-command diagnostics. Memory and CPU limits unchanged. Real guest device validation outstanding.
