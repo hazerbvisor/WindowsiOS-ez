@@ -128,12 +128,22 @@ static void gpt_header(uint8_t *sector, uint64_t current, uint64_t backup, uint6
     write_le(sector + 16, gpt_crc(sector, 92), 4);
 }
 
-static int write_gpt(uint64_t last_sector, bool logs_only) {
-    static const uint8_t esp_guid[16] = {0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
-                                         0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b};
-    static const uint8_t basic_data_guid[16] = {0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44,
-                                                0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7};
-    uint8_t mbr[SECTOR] = {0}, header[SECTOR], table[GPT_TABLE_SECTORS * SECTOR] = {0}, disk_guid[16];
+static const uint8_t esp_guid[16] = {0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+                                     0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b};
+static const uint8_t basic_data_guid[16] = {0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44,
+                                            0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7};
+static const uint8_t msr_guid[16] = {0x16, 0xe3, 0xc9, 0xe3, 0x5c, 0x0b, 0xb8, 0x4d,
+                                     0x81, 0x7d, 0xf9, 0x2d, 0xf0, 0x02, 0x15, 0xae};
+
+typedef struct PartitionSpec {
+    InstallerPartition range;
+    const uint8_t *type;
+    const char *name;
+} PartitionSpec;
+
+static int write_gpt(int fd, uint64_t last_sector, const PartitionSpec *parts, unsigned count,
+                     const uint8_t disk_guid[16]) {
+    uint8_t mbr[SECTOR] = {0}, header[SECTOR], table[GPT_TABLE_SECTORS * SECTOR] = {0};
     mbr[447] = 0x02;
     mbr[450] = 0xee;
     mbr[451] = mbr[452] = mbr[453] = 0xff;
@@ -142,26 +152,77 @@ static int write_gpt(uint64_t last_sector, bool logs_only) {
     mbr[510] = 0x55;
     mbr[511] = 0xaa;
 
-    for (unsigned i = 0; i < (logs_only ? 1u : 2u); ++i) {
+    for (unsigned i = 0; i < count; ++i) {
         uint8_t *entry = table + i * 128;
-        const char *name = logs_only ? "Setup Diagnostics" : (i ? "Windows Images" : "Windows PE");
-        memcpy(entry, logs_only || i ? basic_data_guid : esp_guid, 16);
+        const char *name = parts[i].name;
+        memcpy(entry, parts[i].type, 16);
         random_guid(entry + 16);
-        write_le(entry + 32, volumes[i].start, 8);
-        write_le(entry + 40, volumes[i].start + volumes[i].sectors - 1, 8);
+        write_le(entry + 32, parts[i].range.start, 8);
+        write_le(entry + 40, parts[i].range.start + parts[i].range.sectors - 1, 8);
         for (size_t n = 0; name[n]; ++n) entry[56 + n * 2] = (uint8_t)name[n];
     }
 
-    random_guid(disk_guid);
     uint32_t checksum = gpt_crc(table, sizeof(table));
     uint64_t backup_entries = last_sector - GPT_TABLE_SECTORS;
     gpt_header(header, 1, last_sector, 2, last_sector, disk_guid, checksum);
-    if (transfer(image_fd, mbr, SECTOR, 0, true) ||
-        transfer(image_fd, header, SECTOR, SECTOR, true) ||
-        transfer(image_fd, table, sizeof(table), 2 * SECTOR, true)) return -1;
+    if (transfer(fd, mbr, SECTOR, 0, true) ||
+        transfer(fd, header, SECTOR, SECTOR, true) ||
+        transfer(fd, table, sizeof(table), 2 * SECTOR, true)) return -1;
     gpt_header(header, last_sector, 1, backup_entries, last_sector, disk_guid, checksum);
-    return transfer(image_fd, table, sizeof(table), backup_entries * SECTOR, true) ||
-           transfer(image_fd, header, SECTOR, last_sector * SECTOR, true) ? -1 : 0;
+    return transfer(fd, table, sizeof(table), backup_entries * SECTOR, true) ||
+           transfer(fd, header, SECTOR, last_sector * SECTOR, true) ? -1 : 0;
+}
+
+static int write_media_gpt(uint64_t last_sector, bool logs_only) {
+    uint8_t guid[16];
+    random_guid(guid);
+    PartitionSpec parts[] = {
+        {volumes[0], logs_only ? basic_data_guid : esp_guid, logs_only ? "Setup Diagnostics" : "Windows PE"},
+        {volumes[1], basic_data_guid, "Windows Images"}
+    };
+    return write_gpt(image_fd, last_sector, parts, logs_only ? 1 : 2, guid);
+}
+
+static int hex_digit(char c) {
+    const char *digits = "0123456789abcdef";
+    if (c >= 'A' && c <= 'F') c += 'a' - 'A';
+    const char *match = strchr(digits, c);
+    return match ? (int)(match - digits) : -1;
+}
+
+int winios_gpt_guid(const char *text, uint8_t uuid[16]) {
+    static const uint8_t gpt_order[] = {3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15};
+    if (!text || strlen(text) != 36) return -1;
+    for (unsigned i = 0; i < 16; i++) {
+        if ((i == 4 || i == 6 || i == 8 || i == 10) && *text++ != '-') return -1;
+        int hi = hex_digit(*text++), lo = hex_digit(*text++);
+        if (hi < 0 || lo < 0) return -1;
+        uuid[gpt_order[i]] = (uint8_t)(hi * 16 + lo);
+    }
+    return 0;
+}
+
+static void direct_layout(PartitionSpec parts[3], uint64_t sectors) {
+    const uint64_t esp = (100u << 20) / SECTOR, msr = (16u << 20) / SECTOR;
+    uint64_t windows = ALIGNMENT + esp + msr;
+    /* Leave the backup GPT in a separate allocation block from the Windows partition. */
+    parts[0] = (PartitionSpec){{ALIGNMENT, esp}, esp_guid, "System"};
+    parts[1] = (PartitionSpec){{ALIGNMENT + esp, msr}, msr_guid, "Microsoft reserved"};
+    parts[2] = (PartitionSpec){{windows, sectors - ALIGNMENT - windows}, basic_data_guid, "Windows"};
+}
+
+int winios_create_direct_target(const char *path, uint64_t bytes, const char *target_guid) {
+    uint8_t guid[16];
+    if (!path || bytes < (64ull << 30) || bytes > INT64_MAX || bytes % (ALIGNMENT * SECTOR) ||
+        winios_gpt_guid(target_guid, guid)) return -1;
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    PartitionSpec parts[3];
+    direct_layout(parts, bytes / SECTOR);
+    int failed = ftruncate(fd, (off_t)bytes) || write_gpt(fd, bytes / SECTOR - 1, parts, 3, guid) || fsync(fd);
+    if (close(fd)) failed = 1;
+    if (failed) unlink(path);
+    return failed ? -1 : 0;
 }
 
 typedef struct InstallerBuild {
@@ -174,6 +235,7 @@ typedef struct InstallerBuild {
     bool boot_wim;
     bool setup_program;
     bool boot_bcd;
+    const char *direct_guid;
     int boot_wim_fd;
     uint64_t boot_wim_size;
     uint8_t *buffer;
@@ -242,11 +304,12 @@ static bool safe_name(const char *name) {
 /* WinPE boots from FAT32. In the modern layout Windows Setup runs from the
  * complete exFAT source tree, with the already loaded boot.wim kept on FAT32. */
 static unsigned installer_destinations(const InstallerBuild *build, const char *path, bool image, bool boot_wim) {
-    if (build->boot_wim_fd < 0) return image ? 2 : 1;
     if (boot_wim) return 1;
+    if (build->boot_wim_fd < 0) return image ? 2 : 1;
     if (!strncasecmp(path, "/boot/", 6) || !strncasecmp(path, "/efi/", 5) ||
         !strcasecmp(path, "/bootmgr") || !strcasecmp(path, "/bootmgr.efi"))
-        return 3;
+        return build->direct_guid ? 1 : 3;
+    if (build->direct_guid && !image) return 0;
     return 2;
 }
 
@@ -271,9 +334,11 @@ static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, i
         int count = snprintf(path, sizeof(path), "0:%s/%s", prefix, entry.name);
         if (count < 0 || (size_t)count >= sizeof(path)) return fail(build, "An installer path is too long.");
         if (entry.type == DISC_DIR) {
+            if (build->direct_guid && depth == 0 && strcasecmp(entry.name, "boot") &&
+                strcasecmp(entry.name, "efi") && strcasecmp(entry.name, "sources")) continue;
             if (copying) {
                 if (f_mkdir(path) != FR_OK) return fail(build, "An installer folder could not be created.");
-                if (build->boot_wim_fd >= 0) {
+                if (build->boot_wim_fd >= 0 && !build->direct_guid) {
                     path[0] = '1';
                     FRESULT folder = f_mkdir(path);
                     if (folder != FR_OK && (folder != FR_EXIST || strcasecmp(path + 2, "/sources")))
@@ -406,18 +471,27 @@ static int format_partitions(InstallerBuild *build, FATFS *boot, FATFS *payload)
     FIL marker;
     if (f_open(&marker, "1:/WINIOS.MEDIA", FA_CREATE_NEW | FA_WRITE) != FR_OK || f_close(&marker) != FR_OK)
         return fail(build, "The installer payload marker could not be written.");
-    if (build->boot_wim_fd >= 0) {
+    if (build->direct_guid) {
+        UINT written = 0;
+        if (f_open(&marker, "1:/WINIOS.DIRECT", FA_CREATE_NEW | FA_WRITE) != FR_OK)
+            return fail(build, "The DISM target identity could not be staged.");
+        char record[39];
+        snprintf(record, sizeof(record), "%s\r\n", build->direct_guid);
+        FRESULT saved = f_write(&marker, record, 38, &written);
+        if (f_close(&marker) != FR_OK || saved != FR_OK || written != 38)
+            return fail(build, "The DISM target identity could not be written.");
+    } else if (build->boot_wim_fd >= 0) {
         if (f_open(&marker, "1:/WINIOS.V2", FA_CREATE_NEW | FA_WRITE) != FR_OK || f_close(&marker) != FR_OK)
             return fail(build, "The Setup layout marker could not be written.");
     }
     return 0;
 }
 
-int winios_build_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
-                                const char *driver_directory, const char *answer_path,
-                                WinIOSInstallerProgress progress, void *context,
-                                char *error, size_t error_size) {
-    InstallerBuild build = {.boot_wim_fd = -1, .progress = progress, .context = context, .error = error, .error_size = error_size};
+static int build_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
+                                const char *driver_directory, const char *answer_path, const char *direct_guid,
+                                WinIOSInstallerProgress progress, void *context, char *error, size_t error_size) {
+    InstallerBuild build = {.boot_wim_fd = -1, .direct_guid = direct_guid, .progress = progress,
+                            .context = context, .error = error, .error_size = error_size};
     struct stat info;
     DiscImage *image = NULL;
     DiscDirectory *root = NULL;
@@ -451,7 +525,7 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
         fail(&build, "The ISO needs an ARM64 EFI loader, boot configuration, WinPE and exactly one install image.");
         goto done;
     }
-    if (build.boot_wim_fd >= 0 && !build.setup_program) {
+    if (build.boot_wim_fd >= 0 && !direct_guid && !build.setup_program) {
         fail(&build, "The ISO payload is missing a valid ARM64 sources/setup.exe.");
         goto done;
     }
@@ -485,7 +559,7 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
                                       align_up(payload_bytes, ALIGNMENT * SECTOR) / SECTOR};
     uint64_t last_sector = volumes[1].start + volumes[1].sectors + GPT_TABLE_SECTORS;
     if (last_sector >= INT64_MAX / SECTOR || ftruncate(image_fd, (off_t)((last_sector + 1) * SECTOR)) ||
-        write_gpt(last_sector, false)) {
+        write_media_gpt(last_sector, false)) {
         fail(&build, "The sparse GPT installer disk could not be written.");
         goto done;
     }
@@ -518,6 +592,25 @@ done:
     free(build.buffer);
     pthread_mutex_unlock(&volume_lock);
     return result;
+}
+
+int winios_build_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
+                                const char *driver_directory, const char *answer_path,
+                                WinIOSInstallerProgress progress, void *context, char *error, size_t error_size) {
+    return build_installer_disk(iso_path, output_path, boot_wim_path, driver_directory, answer_path,
+                                NULL, progress, context, error, error_size);
+}
+
+int winios_build_direct_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
+                                      const char *driver_directory, const char *target_guid,
+                                      WinIOSInstallerProgress progress, void *context, char *error, size_t error_size) {
+    uint8_t guid[16];
+    if (!boot_wim_path || winios_gpt_guid(target_guid, guid)) {
+        if (error && error_size) snprintf(error, error_size, "The DISM installation plan is invalid.");
+        return -1;
+    }
+    return build_installer_disk(iso_path, output_path, boot_wim_path, driver_directory, NULL,
+                                target_guid, progress, context, error, error_size);
 }
 
 
@@ -581,11 +674,46 @@ static bool blank_target(const char *path) {
     return blank;
 }
 
+static bool direct_target_is_untouched(const char *path, const uint8_t guid[16]) {
+    if (!path) return false;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    bool valid = false;
+    struct stat info;
+    uint8_t header[SECTOR], table[GPT_TABLE_SECTORS * SECTOR];
+    if (fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_size < (64ll << 30) ||
+        info.st_size % (ALIGNMENT * SECTOR) || transfer(fd, header, sizeof(header), SECTOR, false) ||
+        memcmp(header, "EFI PART", 8) || memcmp(header + 56, guid, 16) || field_le(header + 72, 8) != 2 ||
+        transfer(fd, table, sizeof(table), 2 * SECTOR, false)) goto done;
+    PartitionSpec parts[3];
+    uint64_t sectors = (uint64_t)info.st_size / SECTOR;
+    uint8_t expected[SECTOR], backup[sizeof(table)];
+    uint32_t crc = gpt_crc(table, sizeof(table));
+    gpt_header(expected, 1, sectors - 1, 2, sectors - 1, guid, crc);
+    if (memcmp(header, expected, sizeof(header))) goto done;
+    uint64_t backup_start = sectors - 1 - GPT_TABLE_SECTORS;
+    gpt_header(expected, sectors - 1, 1, backup_start, sectors - 1, guid, crc);
+    if (transfer(fd, header, sizeof(header), (sectors - 1) * SECTOR, false) || memcmp(header, expected, sizeof(header)) ||
+        transfer(fd, backup, sizeof(backup), backup_start * SECTOR, false) || memcmp(table, backup, sizeof(table))) goto done;
+    direct_layout(parts, sectors);
+    for (unsigned i = 0; i < 3; i++) {
+        const uint8_t *entry = table + i * 128;
+        if (memcmp(entry, parts[i].type, 16) || field_le(entry + 32, 8) != parts[i].range.start ||
+            field_le(entry + 40, 8) != parts[i].range.start + parts[i].range.sectors - 1) goto done;
+    }
+    for (size_t i = 3 * 128; i < sizeof(table); i++) if (table[i]) goto done;
+    off_t data = lseek(fd, (off_t)ALIGNMENT * SECTOR, SEEK_DATA);
+    valid = data >= info.st_size - (off_t)ALIGNMENT * SECTOR || (data < 0 && errno == ENXIO);
+done:
+    close(fd);
+    return valid;
+}
+
 int winios_configure_installer_answer(const char *installer, const char *primary) {
     if (!installer) return -1;
-    bool allow = blank_target(primary);
     pthread_mutex_lock(&volume_lock);
-    image_fd = open(installer, O_RDWR | O_NOFOLLOW | O_NONBLOCK);
+    image_readonly = true;
+    image_fd = open(installer, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     struct stat info;
     FATFS payload;
     FIL marker;
@@ -610,6 +738,34 @@ int winios_configure_installer_answer(const char *installer, const char *primary
     if (start <= boot_end || start >= sectors || last < start || last >= sectors) goto done;
     volumes[1] = (InstallerPartition){start, last - start + 1};
     if (f_mount(&payload, "1:", 1) != FR_OK || f_stat("1:/WINIOS.MEDIA", &answer) != FR_OK) goto done;
+    FRESULT direct = f_stat("1:/WINIOS.DIRECT", &answer);
+    if (direct == FR_OK) {
+        result = -2;
+        if (answer.fsize != 38 || f_open(&marker, "1:/WINIOS.DIRECT", FA_READ) != FR_OK) goto done;
+        char text[38] = {0};
+        uint8_t guid[16];
+        UINT count = 0;
+        FRESULT read = f_read(&marker, text, sizeof(text), &count);
+        f_close(&marker);
+        bool newline = text[36] == '\r' && text[37] == '\n';
+        text[36] = '\0';
+        if (read == FR_OK && count == sizeof(text) && newline && !winios_gpt_guid(text, guid) &&
+            direct_target_is_untouched(primary, guid))
+            result = 0;
+        goto done;
+    }
+    if (direct != FR_NO_FILE) goto done;
+    int writable = open(installer, O_RDWR | O_NOFOLLOW | O_NONBLOCK);
+    struct stat same;
+    if (writable < 0) goto done;
+    if (fstat(writable, &same) || same.st_dev != info.st_dev || same.st_ino != info.st_ino || same.st_size != info.st_size) {
+        close(writable);
+        goto done;
+    }
+    close(image_fd);
+    image_fd = writable;
+    image_readonly = false;
+    bool allow = blank_target(primary);
     if (allow && f_stat("1:/WINIOS.V2", &answer) == FR_OK &&
         f_stat("1:/WINIOS-SETUP.XML", &answer) == FR_OK && answer.fsize > 0) {
         if (f_open(&marker, "1:/WINIOS.AUTO", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK ||
@@ -623,6 +779,7 @@ done:
     f_mount(NULL, "1:", 0);
     if (image_fd >= 0) close(image_fd);
     image_fd = -1;
+    image_readonly = false;
     pthread_mutex_unlock(&volume_lock);
     return result;
 }
@@ -672,7 +829,7 @@ int winios_prepare_setup_logs(const char *path) {
     uint8_t buffer[4096];
     FIL marker;
     if (ftruncate(image_fd, (off_t)SETUP_LOG_SECTORS * SECTOR) ||
-        write_gpt(SETUP_LOG_SECTORS - 1, true) ||
+        write_media_gpt(SETUP_LOG_SECTORS - 1, true) ||
         f_mkfs("0:", &fat32, buffer, sizeof buffer) != FR_OK ||
         f_mount(&volume, "0:", 1) != FR_OK ||
         f_open(&marker, "0:/WINIOS.LOG", FA_CREATE_NEW | FA_WRITE) != FR_OK ||

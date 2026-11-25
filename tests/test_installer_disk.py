@@ -348,6 +348,7 @@ EFI_STATUS efi_main(void *image, void *system_table) {
         runner = self.work / "prepare.c"
         runner.write_text(r"""
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "installer_winpe.h"
 
@@ -360,6 +361,20 @@ static int cancel_plan(uint64_t copied, uint64_t total, void *context) {
 
 int main(int argc, char **argv) {
     char error[256] = {0};
+    if (!strcmp(argv[1], "--direct")) {
+        int result = winios_prepare_direct_winpe_wim(argv[2], argv[3], argv[4], atoi(argv[5]),
+                                                      NULL, NULL, error, sizeof(error));
+        if (!result && argc == 8)
+            result = winios_build_direct_installer_disk(argv[2], argv[6], argv[7], NULL, argv[4],
+                                                         NULL, NULL, error, sizeof(error));
+        if (result) fprintf(stderr, "%s\n", error);
+        return result != 0;
+    }
+    if (!strcmp(argv[1], "--target")) return winios_create_direct_target(argv[2], 64ull << 30, argv[3]) != 0;
+    if (!strcmp(argv[1], "--arm")) {
+        int rc = winios_configure_installer_answer(argv[2], argv[3]);
+        return rc < 0 ? -rc : rc;
+    }
     if (argc == 5) {
         int result = winios_build_installer_disk(argv[1], argv[4], argv[3], NULL, NULL,
                                                  cancel_plan, NULL, error, sizeof(error));
@@ -411,6 +426,96 @@ int main(int argc, char **argv) {
                               capture_output=True)
         self.assertEqual(plan.returncode, 0, plan.stderr.decode())
         self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(all(os.environ.get(name) for name in
+                             ("WINDOWS_24H2_ARM64_ISO", "WIMLIB_HEADER", "WIMLIB_LIBRARY", "WIMLIB_IMAGEX")),
+                         "a genuine ARM64 24H2 ISO and host wimlib are required")
+    def test_genuine_windows_iso_direct_winpe_tools_and_launcher(self):
+        binary = self.compile_winpe_preparer()
+        staging = self.work / "direct"
+        staging.mkdir()
+        guid = "49E73949-111A-41CB-9A50-B44C0261EE49"
+        index = os.environ.get("WINDOWS_24H2_TEST_IMAGE_INDEX", "1")
+        result = subprocess.run([binary, "--direct", os.environ["WINDOWS_24H2_ARM64_ISO"], staging, guid, index],
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.verify_direct_script(staging, guid, index)
+
+    def verify_direct_script(self, staging, guid, index):
+        imagex = os.environ["WIMLIB_IMAGEX"]
+        patched = staging / "boot.wim"
+        info = subprocess.check_output([imagex, "info", patched], text=True)
+        boot = re.search(r"Boot Index:\s+(\d+)", info)
+        self.assertIsNotNone(boot, info)
+        subprocess.run([imagex, "extract", patched, boot[1], "/Windows/System32/winios-setup.cmd",
+                        f"--dest-dir={staging}"], stdout=subprocess.DEVNULL, check=True)
+        script = (staging / "winios-setup.cmd").read_text()
+        self.assertIn(f'set "TARGET_GUID={guid}"', script)
+        self.assertIn(f'set "IMAGE_INDEX={index}"', script)
+        self.assertIn("select partition 1", script)
+        self.assertIn("select partition 3", script)
+        self.assertIn("/Index:%IMAGE_INDEX%", script)
+        self.assertIn("sources\\install.esd", script)
+        self.assertIn("/Add-Driver", script)
+        self.assertIn("bcdboot W:\\Windows /s S: /f UEFI", script)
+        self.assertIn("bootaa64.efi", script)
+        self.assertIn("FAILED stage=%STAGE% exit=%RC%", script)
+        self.assertIn("wpeutil shutdown", script)
+        for forbidden in ("echo clean", "list volume", "select disk 0", "ForceUnsigned", "reg add", "setup.exe"):
+            self.assertNotIn(forbidden, script)
+
+    @unittest.skipUnless(all(os.environ.get(name) for name in ("WIMLIB_HEADER", "WIMLIB_LIBRARY", "WIMLIB_IMAGEX")),
+                         "host wimlib is unavailable")
+    def test_direct_target_layout_and_safe_arming(self):
+        import uuid
+
+        guid = "49E73949-111A-41CB-9A50-B44C0261EE49"
+        wim_source = self.work / "direct-winpe"
+        system = wim_source / "Windows/System32"
+        system.mkdir(parents=True)
+        for tool in ("bcdboot", "bcdedit", "cmd", "diskpart", "Dism", "find", "wpeinit", "wpeutil"):
+            (system / f"{tool}.exe").write_text(tool)
+        wim_path = self.source / "Sources/Boot.WIM"
+        wim_path.unlink()
+        subprocess.run([os.environ["WIMLIB_IMAGEX"], "capture", wim_source, wim_path, "Windows PE", "--boot"],
+                       stdout=subprocess.DEVNULL, check=True)
+        (self.source / "Sources/Setup.exe").unlink()  # Direct media needs no graphical Setup program.
+        self.make_iso("-J")
+        binary = self.compile_winpe_preparer()
+        staging = self.work / "build-direct"
+        staging.mkdir()
+        target = self.work / "windows11.img"
+        subprocess.run([binary, "--target", target, guid], check=True)
+        subprocess.run([binary, "--direct", self.iso, staging, guid, "3", self.output, staging / "boot.wim"], check=True)
+        self.verify_direct_script(staging, guid, "3")
+        self.assertIn("WINIOS.DIRECT", self.exfat_root_names())
+        self.assertNotIn("WINIOS.V2", self.exfat_root_names())
+        with target.open("rb") as disk:
+            disk.seek(512)
+            header = disk.read(512)
+            entries = disk.read(128 * 3)
+            self.assertEqual(header[56:72], uuid.UUID(guid).bytes_le)
+            for index, expected in enumerate(("c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+                                              "e3c9e316-0b5c-4db8-817d-f92df00215ae",
+                                              "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7")):
+                self.assertEqual(entries[index * 128:index * 128 + 16], uuid.UUID(expected).bytes_le)
+            self.assertEqual(struct.unpack_from("<QQ", entries, 32), (2048, 206847))
+            self.assertEqual(struct.unpack_from("<QQ", entries, 160), (206848, 239615))
+            disk.seek(-512, os.SEEK_END)
+            self.assertEqual(disk.read(512)[56:72], uuid.UUID(guid).bytes_le)
+        subprocess.run([binary, "--arm", self.output, target], check=True)
+        duplicate = self.work / "other.img"
+        subprocess.run([binary, "--target", duplicate, str(uuid.uuid4())], check=True)
+        self.assertEqual(subprocess.run([binary, "--arm", self.output, duplicate]).returncode, 2)
+        self.assertNotEqual(subprocess.run([binary, "--target", target, guid]).returncode, 0)
+        with target.open("r+b") as disk:
+            disk.seek(240000 * 512)
+            disk.write(b"Partial Windows files remain on this disk")
+        self.assertEqual(subprocess.run([binary, "--arm", self.output, target]).returncode, 2)
+        with target.open("rb") as disk:
+            disk.seek(240000 * 512)
+            expected = b"Partial Windows files remain on this disk"
+            self.assertEqual(disk.read(len(expected)), expected)
 
     @unittest.skipUnless(os.environ.get("WIMLIB_HEADER") and os.environ.get("WIMLIB_LIBRARY")
                          and os.environ.get("WIMLIB_IMAGEX"), "host wimlib is unavailable")

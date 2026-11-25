@@ -174,7 +174,10 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     }
     if (c->disk1 && *c->disk1) {
 #if TARGET_OS_IPHONE
-        if (winios_configure_installer_answer(c->disk1, c->disk0) != 0)
+        int installer_status = winios_configure_installer_answer(c->disk1, c->disk0);
+        if (installer_status == -2)
+            return fail(err, errlen, "DISM can only start on its original untouched GPT target. Use the installed disk if provisioning finished, or create a new VM. The existing disk was preserved.");
+        if (installer_status != 0)
             return fail(err, errlen, "Cannot prepare safe Windows Setup options for this installer disk.");
 #endif
         if (hv_disk_open(&disk1, c->disk1, 0, 1) != 0)
@@ -339,8 +342,11 @@ int hv_winvm_run_cpu0(void) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
 #if TARGET_OS_IPHONE
-            if (setup_disk_path && winios_configure_installer_answer(setup_disk_path, NULL) != 0) {
-                fprintf(stderr, "winvm: could not disarm unattended Setup; stopping the VM\n");
+            int installer_status = setup_disk_path ? winios_configure_installer_answer(setup_disk_path, NULL) : 0;
+            if (installer_status != 0) {
+                fprintf(stderr, "%s\n", installer_status == -2
+                        ? "winvm: stopping before a DISM provisioning disk can run again"
+                        : "winvm: could not disarm unattended Setup; stopping the VM");
                 return HV_EXIT_HALT;
             }
 #endif

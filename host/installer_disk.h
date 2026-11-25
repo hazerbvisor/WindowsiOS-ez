@@ -14,9 +14,19 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
                                 const char *driver_directory, const char *answer_path,
                                 WinIOSInstallerProgress progress, void *context,
                                 char *error, size_t error_size);
+int winios_build_direct_installer_disk(const char *iso_path, const char *output_path, const char *boot_wim_path,
+                                      const char *driver_directory, const char *target_guid,
+                                      WinIOSInstallerProgress progress, void *context,
+                                      char *error, size_t error_size);
+
+/* Create a new sparse EFI/MSR/Windows GPT disk. Existing paths are refused. */
+int winios_create_direct_target(const char *path, uint64_t bytes, const char *target_guid);
+/* Convert a canonical GUID to its GPT on-disk byte order. */
+int winios_gpt_guid(const char *text, uint8_t uuid[16]);
 
 /* Enable the answer file only for a verified blank primary. Pass a NULL
- * primary to disable automation before a guest reboot. */
+ * primary to disable automation before a guest reboot. Returns -2 when a
+ * direct installer cannot be armed for its original, untouched target. */
 int winios_configure_installer_answer(const char *installer, const char *primary);
 /* Create or reuse a bounded, writable GPT diagnostics disk. */
 int winios_prepare_setup_logs(const char *path);
