@@ -44,3 +44,5 @@ The first hardware gate is PCI enumeration and recovery on a copied Windows VM. 
 
 ### MetalGPU driver access and DXMT dependency probe
 Added a per-installed-VM opt-in (legacy manifests default off), a pinned checksum-verified ARM64 display-only driver download and explicit guest PowerShell installation instructions. RAMFB remains the default for installation and recovery. `scripts/build_dxmt_probe.sh` is an isolated, manual native iPhoneOS DX11-only dependency build entry point requiring target LLVM 15.0.7. Neither the app changes nor the probe have been compiled on Xcode in this change. No Neptune renderer or 3D capset is enabled; physical guest verification is pending.
+
+Added `scripts/package_dxmt_smoke.sh` to package the pinned native offscreen DXMT tests as a separate unsigned device probe. This can validate the iPadOS renderer independently before integrating it with Neptune. The script is not a tested build artifact and has not been run on Xcode.
