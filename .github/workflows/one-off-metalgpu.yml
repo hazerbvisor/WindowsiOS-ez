@@ -1,4 +1,4 @@
-name: MetalGPU container shared-memory IPA
+name: MetalGPU container shared-memory IPA (ObjC toolchain)
 on:
   push:
     branches: [build/metalgpu-shmem-fix]

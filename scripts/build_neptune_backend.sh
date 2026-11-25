@@ -40,6 +40,8 @@ cat > "$CROSS" <<EOF
 [binaries]
 c = '$CC'
 cpp = '$CXX'
+objc = '$CC'
+objcpp = '$CXX'
 ar = '$AR'
 strip = '$STRIP'
 pkg-config = '$(command -v pkg-config)'
@@ -55,8 +57,12 @@ pkg_config_libdir = ['$DEPS/lib/pkgconfig','$DEPS/share/pkgconfig']
 [built-in options]
 c_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-I$DEPS/include']
 cpp_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-I$DEPS/include']
+objc_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-I$DEPS/include']
+objcpp_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-I$DEPS/include']
 c_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
 cpp_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
+objc_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
+objcpp_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
 EOF
 BUILD="$WORK/build"
 OPTIONS=(-Dneptune=true -Dvenus=false -Dcheck-gl-errors=false -Dvulkan-dload=false -Drender-server-mode=thread -Drender-server-worker=thread -Dplatforms=egl -Dunstable-apis=true -Dvtest=false -Dtests=false -Dvideo=false -Ddefault_library=shared)
