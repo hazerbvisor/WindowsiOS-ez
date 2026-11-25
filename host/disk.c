@@ -1,7 +1,11 @@
-#include <fcntl.h>
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#define _POSIX_C_SOURCE 200809L
 #include "../core/machine.h"
 #include "disk.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -12,6 +16,7 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly) {
     struct stat st;
     if (fstat(d->fd, &st) != 0 || (uint64_t)st.st_size < offset) {
         close(d->fd);
+        d->fd = -1;
         return -1;
     }
     d->offset = offset;
@@ -26,10 +31,12 @@ void hv_disk_close(HvDisk *d) {
 }
 
 int hv_disk_read(HvDisk *d, uint64_t off, void *buf, uint64_t len) {
-    if (off > d->size || len > d->size - off) return -1;
+    if (off > d->size || len > d->size - off) { errno = EINVAL; return -1; }
     uint8_t *p = buf;
     while (len) {
         ssize_t n = pread(d->fd, p, len, (off_t)(d->offset + off));
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0) errno = EIO;
         if (n <= 0) return -1;
         p += n;
         off += (uint64_t)n;
@@ -39,10 +46,13 @@ int hv_disk_read(HvDisk *d, uint64_t off, void *buf, uint64_t len) {
 }
 
 int hv_disk_write(HvDisk *d, uint64_t off, const void *buf, uint64_t len) {
-    if (d->readonly || off > d->size || len > d->size - off) return -1;
+    if (d->readonly) { errno = EROFS; return -1; }
+    if (off > d->size || len > d->size - off) { errno = EINVAL; return -1; }
     const uint8_t *p = buf;
     while (len) {
         ssize_t n = pwrite(d->fd, p, len, (off_t)(d->offset + off));
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0) errno = EIO;
         if (n <= 0) return -1;
         p += n;
         off += (uint64_t)n;
@@ -57,12 +67,20 @@ int hv_disk_flush(HvDisk *d) {
     if (d->readonly) return 0;
     switch (hv_knob[HV_K_FLUSH]) {
     case 1: return 0;
-    case 2: return fcntl(d->fd, F_BARRIERFSYNC) == -1 ? -1 : 0;
-    default: return fsync(d->fd);
+#ifdef F_BARRIERFSYNC
+    case 2: {
+        int result;
+        do { result = fcntl(d->fd, F_BARRIERFSYNC); } while (result == -1 && errno == EINTR);
+        return result == -1 ? -1 : 0;
+    }
+#endif
+    default: return hv_disk_sync(d);
     }
 }
 
 int hv_disk_sync(HvDisk *d) {
     if (d->fd < 0 || d->readonly) return 0;
-    return fsync(d->fd);
+    int result;
+    do { result = fsync(d->fd); } while (result == -1 && errno == EINTR);
+    return result;
 }

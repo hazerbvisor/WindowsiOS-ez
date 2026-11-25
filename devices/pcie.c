@@ -105,29 +105,29 @@ int hv_pci_msix_enabled(const HvPciDev *d) {
     return (get16(d->config + d->msix_cap + 2) & 0x8000u) != 0;
 }
 
-static void msix_fire(HvPciDev *d, uint16_t vec) {
+static int msix_fire(HvPciDev *d, uint16_t vec) {
     HvPcie *p = d->bus;
-    if (!p) return;
+    if (!p) return HV_PCI_MSI_UNROUTED;
     uint64_t addr = (uint64_t)d->msix_table[vec].addr_hi << 32 | (d->msix_table[vec].addr_lo & ~3u);
     uint32_t data = d->msix_table[vec].data;
-    if (!addr) return;
+    if (!addr) return HV_PCI_MSI_UNROUTED;
     if (p->its && addr == p->its_translater_pa) {
         uint32_t req_id = (uint32_t)(d->slot << 3); /* Bus 0, Dev=slot, Fn=0 */
-        hv_gicv3_its_msi(p->its, req_id, data);
-        return;
+        return hv_gicv3_its_msi(p->its, req_id, data) ? HV_PCI_MSI_ROUTED : HV_PCI_MSI_UNROUTED;
     }
     if (p->msi_doorbell_pa && addr == p->msi_doorbell_pa) {
         hv_gicv3_pend(p->gic, (int)(data & 0x3ff));
-        return;
+        return HV_PCI_MSI_ROUTED;
     }
     /* Generic fallback: write through machine MMIO */
     for (int i = 0; i < p->m->nmmio; i++) {
         HvMmio *mm = &p->m->mmio[i];
         if (addr - mm->pa < mm->size && mm->write) {
             mm->write(mm->opaque, addr - mm->pa, data, 4);
-            return;
+            return HV_PCI_MSI_ROUTED;
         }
     }
+    return HV_PCI_MSI_UNROUTED;
 }
 
 static void msix_check_pending(HvPciDev *d) {
@@ -142,14 +142,14 @@ static void msix_check_pending(HvPciDev *d) {
     }
 }
 
-void hv_pci_msix_notify(HvPciDev *d, uint16_t vec) {
-    if (!hv_pci_msix_enabled(d) || vec >= d->msix_nvec) return;
+int hv_pci_msix_notify(HvPciDev *d, uint16_t vec) {
+    if (!hv_pci_msix_enabled(d) || vec >= d->msix_nvec) return HV_PCI_MSI_UNROUTED;
     uint16_t mctl = get16(d->config + d->msix_cap + 2);
     if ((mctl & 0x4000u) || (d->msix_table[vec].ctrl & 1)) {
         d->msix_pba |= 1ull << vec;
-        return;
+        return HV_PCI_MSI_DEFERRED;
     }
-    msix_fire(d, vec);
+    return msix_fire(d, vec);
 }
 
 uint64_t hv_pci_bar_addr(HvPciDev *d, int bar) {

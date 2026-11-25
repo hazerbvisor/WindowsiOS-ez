@@ -79,6 +79,7 @@ typedef struct HvWinVirt {
     HvVirtioNet *net;
     HvNvme *nvme0;
     HvNvme *nvme1;
+    HvNvme *nvme_logs;
     HvXhci *usb;
     HvHda *hda;
     HvVirtioSnd *snd;

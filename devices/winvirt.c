@@ -223,8 +223,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
      *    Slot 1: VirtIO-Net  (1af4:1000)
      *    Slot 2: NVMe 0      (1b36:0010, serial WIN11IOS01 -> matches UEFI Boot0001!)
      *    Slot 3: xHCI USB 3  (1b36:000d, Port 1 Keyboard + Port 2 Absolute Tablet)
-     *    Slot 4: NVMe 1      (optional installer/secondary image)
-     *    Slot 5: VirtIO-Snd  (optional audio) */
+     *    Slot 4: HDA
+     *    Slot 5: NVMe 1      (optional installer/secondary image)
+     *    Slot 6: NVMe logs   (optional writable installer diagnostics) */
     b->pcie = hv_pcie_create(m, b->gic, WINVIRT_PCIE_ECAM_PA, WINVIRT_PCIE_ECAM_SZ,
                              WINVIRT_PCIE_MMIO_PA, WINVIRT_PCIE_MMIO_SZ, WINVIRT_INTID_PCIE);
     hv_pcie_add_pio(b->pcie, WINVIRT_PCIE_PIO_PA, WINVIRT_PCIE_PIO_SZ);
@@ -238,8 +239,8 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->usb = hv_xhci_create(m, b->pcie);
     b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
-    if ((disk0 && !b->nvme0) || (disk1 && !b->nvme1) ||
-        (setup_logs && !hv_nvme_create(m, b->pcie, setup_logs, "WINIOSLOG")))
+    if (setup_logs) b->nvme_logs = hv_nvme_create(m, b->pcie, setup_logs, "WINIOSLOG");
+    if ((disk0 && !b->nvme0) || (disk1 && !b->nvme1) || (setup_logs && !b->nvme_logs))
         return -4;
     (void)enable_sound;
 

@@ -32,6 +32,9 @@ static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
 static HvDisk setup_logs = {.fd = -1};
+static pthread_mutex_t disk_checkpoint_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int disk_checkpoint_errno;
+static _Atomic int storage_ready;
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
@@ -230,6 +233,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     }
 #endif
     hv_winvirt_reset_cpu(&board);
+    atomic_store_explicit(&storage_ready, 1, memory_order_release);
 
     share_on = 0;
     if (c->share_dir && *c->share_dir && c->share_sock && *c->share_sock) {
@@ -302,8 +306,27 @@ static void join_secondaries(void) {
 }
 
 void hv_winvm_flush_disks(void) {
-    if (disk0.fd >= 0) hv_disk_sync(&disk0);
-    if (setup_logs.fd >= 0) hv_disk_sync(&setup_logs);
+    pthread_mutex_lock(&disk_checkpoint_lock);
+    int error = 0;
+    if (hv_disk_sync(&disk0) != 0) error = errno;
+    if (hv_disk_sync(&setup_logs) != 0 && !error) error = errno;
+    hv_pflash_sync(board.flash1);
+    atomic_store_explicit(&disk_checkpoint_errno, error, memory_order_relaxed);
+    pthread_mutex_unlock(&disk_checkpoint_lock);
+}
+
+void hv_winvm_storage_diagnostics(char *buffer, size_t capacity) {
+    if (!capacity) return;
+    buffer[0] = '\0';
+    if (!atomic_load_explicit(&storage_ready, memory_order_acquire)) return;
+    int n = snprintf(buffer, capacity, "storage: guest_flush_policy=%d last_host_checkpoint_errno=%d nvram_persist_errno=%d\n",
+                     hv_knob[HV_K_FLUSH], atomic_load_explicit(&disk_checkpoint_errno, memory_order_relaxed),
+                     atomic_load_explicit(&board.flash1->persist_errno, memory_order_relaxed));
+    if (n < 0 || (size_t)n >= capacity) return;
+    size_t used = (size_t)n;
+    used += hv_nvme_diagnostics(board.nvme0, buffer + used, capacity - used);
+    used += hv_nvme_diagnostics(board.nvme1, buffer + used, capacity - used);
+    hv_nvme_diagnostics(board.nvme_logs, buffer + used, capacity - used);
 }
 
 int hv_winvm_run_cpu0(void) {
@@ -341,6 +364,9 @@ int hv_winvm_run_cpu0(void) {
             }
             hv_gicv3_its_reset(board.its);
             hv_pcie_reset(board.pcie);
+            hv_nvme_reset(board.nvme0);
+            hv_nvme_reset(board.nvme1);
+            hv_nvme_reset(board.nvme_logs);
             if (board.flash1) {
                 board.flash1->cmd = 0xff;
                 board.flash1->wcycle = 0;
@@ -367,7 +393,9 @@ static void *cpu0_thread(void *unused) {
     join_secondaries();
     hv_winvm_flush_disks();
     hv_winvirt_close_tpm(&board);
+    pthread_mutex_lock(&disk_checkpoint_lock);
     hv_disk_close(&setup_logs);
+    pthread_mutex_unlock(&disk_checkpoint_lock);
 #if TARGET_OS_IPHONE
     free(setup_disk_path);
     setup_disk_path = NULL;

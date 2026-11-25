@@ -62,6 +62,7 @@ static NSString *processEntitlementStatus(void) {
     NSString *_vmStatus;
     dispatch_queue_t _diagQueue;
     dispatch_source_t _diagTimer;
+    dispatch_source_t _diskCheckpoint;
     CFAbsoluteTime _bootStartTime;
     uint64_t _configuredRamMB;
     uint64_t _requestedRamMB;
@@ -134,6 +135,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         hv_share_set_url_handler_enabled(safariDefault ? 1 : 0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
         _diagQueue = dispatch_queue_create("io.github.hazerbvisor.windowsios-ez.diag", attr);
+        dispatch_queue_t checkpointQueue = dispatch_queue_create("io.github.hazerbvisor.windowsios-ez.checkpoint", attr);
+        _diskCheckpoint = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0, checkpointQueue);
+        dispatch_source_set_event_handler(_diskCheckpoint, ^{ hv_winvm_flush_disks(); });
+        dispatch_resume(_diskCheckpoint);
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationDidEnterBackgroundNotification object:nil];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationWillTerminateNotification object:nil];
@@ -181,9 +186,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)onAppBackgroundOrTerminate:(NSNotification *)note {
     (void)note;
     if (_vmRunning) {
-        dispatch_async(_diagQueue, ^{
-            hv_winvm_flush_disks();
-        });
+        dispatch_source_merge_data(_diskCheckpoint, 1);
     }
 }
 
@@ -598,7 +601,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     [self writeDiagnosticsSnapshot];
     if (_vmRunning) {
         if ((_diagTickCount % 4u) == 0u) {
-            hv_winvm_flush_disks();
+            dispatch_source_merge_data(_diskCheckpoint, 1);
         }
         double uptime = CFAbsoluteTimeGetCurrent() - _bootStartTime;
         if (uptime <= 240.0 || getenv("WINIOS_ALWAYS_SCREENSHOT") != NULL) {
@@ -622,6 +625,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)writeDiagnosticsSnapshot {
     NSString *docs = [self documentsPath];
     NSString *statusFile = [docs stringByAppendingPathComponent:@"boot_status.txt"];
+    char storage[24576];
+    hv_winvm_storage_diagnostics(storage, sizeof storage);
+    NSString *storageStatus = [NSString stringWithUTF8String:storage] ?: @"";
+    if (storageStatus.length) {
+        NSString *storageFile = [docs stringByAppendingPathComponent:@"nvme_status.txt"];
+        [storageStatus writeToFile:storageFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
     BOOL running = _vmRunning;
     double uptime = running ? (CFAbsoluteTimeGetCurrent() - _bootStartTime) : 0.0;
     uint32_t w = [self framebufferWidth], h = [self framebufferHeight];
@@ -725,7 +735,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         (long)hingeStatus,
         hingeDeg,
         pt.width, pt.height, scale];
-    [txt writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [[txt stringByAppendingString:storageStatus] writeToFile:statusFile atomically:YES
+                                                   encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)handleVMExitWithReason:(NSString *)reason {
@@ -797,7 +808,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)flushDisks {
     if (!_vmRunning) return;
-    hv_winvm_flush_disks();
+    dispatch_source_merge_data(_diskCheckpoint, 1);
 }
 
 - (void)captureDiagnostics {

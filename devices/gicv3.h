@@ -57,7 +57,7 @@ HvGic *hv_gicv3_create(HvMachine *m, uint64_t dist_pa, uint64_t redist_pa);
 void hv_gicv2m_create(HvMachine *m, HvGic *g, uint64_t pa, int spi_base, int num_spi);
 /* GICv3 Interrupt Translation Service (128 KB at pa, e.g. 0x08080000 on virt) for LPI MSI/MSI-X. */
 HvGicIts *hv_gicv3_its_create(HvMachine *m, HvGic *g, uint64_t pa);
-void hv_gicv3_its_msi(HvGicIts *its, uint32_t devid, uint32_t eventid);
+int hv_gicv3_its_msi(HvGicIts *its, uint32_t devid, uint32_t eventid);
 void hv_gicv3_its_reset(HvGicIts *its);
 /* Drive an SPI's input line (32+). */
 void hv_gicv3_set_irq(HvGic *g, int intid, int level);
