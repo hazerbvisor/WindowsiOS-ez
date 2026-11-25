@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifdef __APPLE__
+/* Darwin hides O_NOFOLLOW in strict POSIX mode. */
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "media_hash.h"
 
 #include <errno.h>

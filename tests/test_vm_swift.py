@@ -113,6 +113,12 @@ class SwiftFoundationTests(unittest.TestCase):
             self.assertIn(b"libudfread:", result.stdout)
             self.assertIn(b"Selected Joliet", result.stdout)
 
+            alias = work / "alias.iso"
+            alias.symlink_to(hybrid)
+            result = subprocess.run([binary, alias], capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"Could not compute SHA-256", result.stdout)
+
             invalid = work / "bad.iso"
             invalid.write_bytes(b"not an ISO")
             result = subprocess.run([binary, invalid, "0" * 64], capture_output=True)

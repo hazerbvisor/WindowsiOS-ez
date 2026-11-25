@@ -204,6 +204,14 @@ int main(int argc, char **argv) {
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.work.glob("*.building.*")), [])
         self.assertEqual(self.iso.stat().st_size, original)
+
+        alias = self.work / "alias.iso"
+        alias.symlink_to(self.iso)
+        result = subprocess.run([self.binary, alias, self.output], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"Unable to open the ISO file", result.stderr)
+        self.assertFalse(self.output.exists())
+
         (self.source / "Boot/BCD").unlink()
         self.make_iso("-udf")
         self.assertNotEqual(self.build().returncode, 0)
