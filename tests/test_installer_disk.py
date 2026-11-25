@@ -479,6 +479,8 @@ int main(int argc, char **argv) {
         self.assertIn(b"/InstallDrivers", script)
         self.assertIn(b"WINIOS.MEDIA", script)
         self.assertNotIn(b"Bypass", script)
+        self.assertNotIn(b"diskpart /s", script)
+        self.assertIn(b'cmd.exe /d /c call "%~f0" /collect-disk-logs', script)
         self.assertEqual(subprocess.check_output([
             MTYPE, "-i", f"{self.output}@@1048576", "::/Sources/Boot.WIM"
         ]), patched.read_bytes())
