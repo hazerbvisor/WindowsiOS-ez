@@ -107,7 +107,7 @@ struct InstallationAssistant: View {
                             Text(image.name).tag(Optional(image.index))
                         }
                     }
-                    Text("Selecting an edition lets Setup partition a verified blank VM disk. Windows still asks you to accept its terms and complete account setup.")
+                    Text("You will choose the target disk in Windows Setup. Select the unallocated disk with the capacity you configured.")
                         .foregroundStyle(.secondary)
                 }
                 Button("Open Downloads", systemImage: "arrow.down.circle") { showMedia = true }

@@ -254,7 +254,7 @@ struct JITSettingsView: View {
         Form {
             JITStatusSection(vm: vm)
             Section("Setup") {
-                Text("Sign with a profile that allows debugging and enable Developer Mode where required. Complete any pairing in your authorized debugger, open it from here, then return to WindowsiOS-ez.")
+                Text("Sign with a profile that allows debugging and enable Developer Mode where required. Complete pairing in your authorized debugger. Select and start a VM before enabling JIT so the app can request that machine’s cache and RAM.")
                 Text("On a paired Mac, the existing LLDB launcher can attach using the installed bundle identifier.")
                 Toggle("Open guest sign-in links in Safari", isOn: Binding(
                     get: { vm.useSafariForOAuth },

@@ -89,6 +89,7 @@ struct VMRepository: Sendable {
     static let packedDisk = "windows11.hvsparse"
     static let firmware = "code.fd"
     static let nvram = "vars.fd"
+    static let setupLogs = "SetupLogs.img"
     static let installerDisk = "installer.img"
     static let tpmState = "TPM"
     static let minimumDiskBytes: UInt64 = 64 << 20

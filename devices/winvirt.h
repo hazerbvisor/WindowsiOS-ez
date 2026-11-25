@@ -89,9 +89,10 @@ typedef struct HvWinVirt {
 } HvWinVirt;
 
 uint8_t *hv_alloc_no_footprint(uint64_t size);
+uint8_t *hv_alloc_no_footprint_report(uint64_t size, char *error, size_t capacity);
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      HvDisk *disk0, HvDisk *disk1, HvDisk *setup_logs, const uint8_t mac[6], int enable_sound,
                       const char *tpm_state_directory);
 void hv_winvirt_reset_cpu(HvWinVirt *b);
 int hv_winvirt_reset_tpm(HvWinVirt *b);

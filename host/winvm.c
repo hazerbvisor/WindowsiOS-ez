@@ -2,6 +2,7 @@
 #include "winvm.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <errno.h>
 #include <TargetConditionals.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -30,6 +31,7 @@ static int ncpus = 1;
 static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
+static HvDisk setup_logs = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
@@ -177,6 +179,16 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         d1_ptr = &disk1;
     }
 
+    HvDisk *logs_ptr = NULL;
+#if TARGET_OS_IPHONE
+    if (d1_ptr && c->setup_logs_disk) {
+        if (winios_prepare_setup_logs(c->setup_logs_disk) ||
+            hv_disk_open(&setup_logs, c->setup_logs_disk, 0, 0))
+            return fail(err, errlen, "Cannot prepare the writable Windows Setup diagnostics disk.");
+        logs_ptr = &setup_logs;
+    }
+#endif
+
     size_t jit = c->jit_bytes ? c->jit_bytes : ((size_t)768 << 20);
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
     if (r != 0) return fail(err, errlen, "Cannot initialize ARM64 JIT region (is JIT active?).");
@@ -195,10 +207,17 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
     int board_result = hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                                         d0_ptr, d1_ptr, mac, c->enable_sound, c->tpm_state_directory);
+                                         d0_ptr, d1_ptr, logs_ptr, mac, c->enable_sound, c->tpm_state_directory);
     if (board_result != 0) {
+        int board_errno = errno;
         hv_winvirt_close_tpm(&board);
         if (board_result == -2) return fail(err, errlen, "Cannot initialize the VM's TPM 2.0 state.");
+        if (board_result == -3) {
+            if (err && errlen) snprintf(err, errlen, "Guest RAM mmap of %llu MiB failed: %s.",
+                                       (unsigned long long)(ram_bytes >> 20), strerror(board_errno));
+            return -1;
+        }
+        if (board_result == -4) return fail(err, errlen, "Cannot initialize the virtual NVMe disks.");
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
 #if TARGET_OS_IPHONE
@@ -284,6 +303,7 @@ static void join_secondaries(void) {
 
 void hv_winvm_flush_disks(void) {
     if (disk0.fd >= 0) hv_disk_sync(&disk0);
+    if (setup_logs.fd >= 0) hv_disk_sync(&setup_logs);
 }
 
 int hv_winvm_run_cpu0(void) {
@@ -347,6 +367,7 @@ static void *cpu0_thread(void *unused) {
     join_secondaries();
     hv_winvm_flush_disks();
     hv_winvirt_close_tpm(&board);
+    hv_disk_close(&setup_logs);
 #if TARGET_OS_IPHONE
     free(setup_disk_path);
     setup_disk_path = NULL;

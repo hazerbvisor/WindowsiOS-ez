@@ -229,13 +229,19 @@ private struct MachineLibraryView: View {
                     if hasInstaller {
                         Button("Start Windows Setup", systemImage: "play") { start(machine, installer: installer) }
                             .disabled(sessionBusy || vm.needsRelaunchToStart)
-                    } else if let mediaID = machine.mediaID {
-                        Button("Build Windows Setup Disk", systemImage: "opticaldisc") {
+                    }
+                    if let mediaID = machine.mediaID {
+                        Button(hasInstaller ? "Update Windows Setup Disk" : "Build Windows Setup Disk", systemImage: "opticaldisc") {
                             buildInstaller(for: mediaID, output: installer)
                         }
                         .disabled(sessionBusy)
                     }
                     Button("Use Installed Windows Disk", systemImage: "checkmark.circle") { installedCandidate = machine }
+                        .disabled(sessionBusy)
+                }
+                if FileManager.default.fileExists(atPath: repo.directory(for: machine)
+                    .appendingPathComponent(VMRepository.setupLogs).path) {
+                    Button("Export Windows Setup Logs", systemImage: "square.and.arrow.up") { exportSetupLogs(machine) }
                         .disabled(sessionBusy)
                 }
                 if activeMachine?.id == machine.id && vm.isVMRunning {
@@ -286,7 +292,21 @@ private struct MachineLibraryView: View {
         doFileWork {
             let drivers = InstallerAssets.bundled.drivers
             try NetKVMDrivers.validate(from: drivers)
-            try InstallerPreparation.build(iso: iso, output: output, expectedSHA256: checksum, drivers: drivers) { _ in }
+            let manager = FileManager.default
+            let workspace = output.deletingLastPathComponent()
+                .appendingPathComponent(".setup-update-\(UUID().uuidString)", isDirectory: true)
+            try manager.createDirectory(at: workspace, withIntermediateDirectories: false)
+            defer { try? manager.removeItem(at: workspace) }
+            let updated = workspace.appendingPathComponent(output.lastPathComponent)
+            try InstallerPreparation.build(iso: iso, output: updated, expectedSHA256: checksum, drivers: drivers) { _ in }
+            if manager.fileExists(atPath: output.path) {
+                let backup = output.deletingLastPathComponent()
+                    .appendingPathComponent("Setup Backup-\(UUID().uuidString).img")
+                try manager.linkItem(at: output, to: backup)
+                _ = try manager.replaceItemAt(output, withItemAt: updated)
+            } else {
+                try manager.moveItem(at: updated, to: output)
+            }
         }
     }
 
@@ -399,6 +419,34 @@ private struct MachineLibraryView: View {
                 }
             } catch {
                 if local { try? FileManager.default.removeItem(at: workspace) } else { cleanExports() }
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportSetupLogs(_ machine: VirtualMachine) {
+        guard !busy, !sessionBusy else { return }
+        busy = true
+        let image = repo.directory(for: machine).appendingPathComponent(VMRepository.setupLogs)
+        let folder = Self.exportDirectory.appendingPathComponent("Windows Setup Logs", isDirectory: true)
+        Task {
+            defer { busy = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let files = image.withUnsafeFileSystemRepresentation { input in
+                        folder.withUnsafeFileSystemRepresentation { output in
+                            winios_export_setup_logs(input, output)
+                        }
+                    }
+                    guard files > 0 else {
+                        throw VMError.message(files == 0 ? "Windows Setup has not saved any logs on the diagnostics disk yet."
+                            : "The Windows Setup diagnostics disk could not be read.")
+                    }
+                }.value
+                pickerRequest = DocumentPickerRequest(exporting: folder)
+            } catch {
+                cleanExports()
                 self.error = error.localizedDescription
             }
         }

@@ -23,7 +23,7 @@
 
 extern kern_return_t mach_memory_entry_ownership(mach_port_t entry, task_t owner, int ledger_tag, int ledger_flags);
 
-uint8_t *hv_alloc_no_footprint(uint64_t size) {
+uint8_t *hv_alloc_no_footprint_report(uint64_t size, char *error, size_t capacity) {
     enum {
         CHUNK = 128u << 20,
         MAP_MEM_LEDGER_TAGGED_ = 0x002000,
@@ -32,7 +32,11 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
         LEDGER_NO_FOOTPRINT = 1,
     };
     vm_address_t base = 0;
-    if (vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NULL;
+    kern_return_t reserve = vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE);
+    if (reserve != KERN_SUCCESS) {
+        if (error) snprintf(error, capacity, "vm_allocate: %d (%s).", reserve, mach_error_string(reserve));
+        return NULL;
+    }
     for (uint64_t off = 0; off < size; off += CHUNK) {
         uint64_t len = size - off < CHUNK ? size - off : CHUNK;
         memory_object_size_t got = len;
@@ -41,15 +45,21 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
             mach_task_self(), &got, 0,
             MAP_MEM_NAMED_CREATE_ | MAP_MEM_LEDGER_TAGGED_ | VM_PROT_READ | VM_PROT_WRITE,
             &entry, MACH_PORT_NULL);
-        if (kr == KERN_SUCCESS)
-            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
+        const char *stage = "mach_make_memory_entry_64";
         if (kr == KERN_SUCCESS) {
+            stage = "mach_memory_entry_ownership";
+            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
+        }
+        if (kr == KERN_SUCCESS) {
+            stage = "vm_map";
             vm_address_t to = base + off;
             kr = vm_map(mach_task_self(), &to, len, 0, VM_FLAGS_OVERWRITE, entry, 0, FALSE,
                         VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
         }
         if (entry != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), entry);
         if (kr != KERN_SUCCESS) {
+            if (error) snprintf(error, capacity, "%s at +%llu MiB: %d (%s); reservation released.",
+                                stage, (unsigned long long)(off >> 20), kr, mach_error_string(kr));
             fprintf(stderr, "winvm: guest RAM outside footprint refused (%s), falling back\n", mach_error_string(kr));
             vm_deallocate(mach_task_self(), base, size);
             return NULL;
@@ -58,6 +68,10 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
     fprintf(stderr, "winvm: guest RAM (%llu MB) allocated outside Jetsam footprint\n",
             (unsigned long long)(size >> 20));
     return (uint8_t *)base;
+}
+
+uint8_t *hv_alloc_no_footprint(uint64_t size) {
+    return hv_alloc_no_footprint_report(size, NULL, 0);
 }
 
 struct PrefaultArgs {
@@ -120,7 +134,7 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      HvDisk *disk0, HvDisk *disk1, HvDisk *setup_logs, const uint8_t mac[6], int enable_sound,
                       const char *tpm_state_directory) {
     memset(b, 0, sizeof *b);
     b->m = m;
@@ -156,7 +170,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     }
     if (b->ram == MAP_FAILED)
         b->ram = mmap(NULL, ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (b->ram == MAP_FAILED) return -1;
+    if (b->ram == MAP_FAILED) return -3;
 
     /* 2. Build Flattened Device Tree (placed at 0x40000000 on every reset) */
     uint32_t tpm_address = 0;
@@ -224,6 +238,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->usb = hv_xhci_create(m, b->pcie);
     b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
+    if ((disk0 && !b->nvme0) || (disk1 && !b->nvme1) ||
+        (setup_logs && !hv_nvme_create(m, b->pcie, setup_logs, "WINIOSLOG")))
+        return -4;
     (void)enable_sound;
 
     m->tick = tick;

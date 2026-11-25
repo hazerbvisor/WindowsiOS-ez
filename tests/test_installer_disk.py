@@ -47,6 +47,10 @@ static int progress(uint64_t copied, uint64_t total, void *context) {
 
 int main(int argc, char **argv) {
     char error[256] = {0};
+    if (argc == 3 && !strcmp(argv[2], "logs"))
+        return winios_prepare_setup_logs(argv[1]) != 0;
+    if (argc == 4 && !strcmp(argv[3], "export-logs"))
+        return winios_export_setup_logs(argv[1], argv[2]) != 1;
     if (argc == 4 && !strcmp(argv[3], "check"))
         return !winios_has_windows_boot_files(argv[1], 2048, 524288);
     if (argc == 4 && !strcmp(argv[3], "configure"))
@@ -76,10 +80,16 @@ int main(int argc, char **argv) {
         self.source = self.work / "files"
         for name in ("EFI/Boot", "Boot", "Sources"):
             (self.source / name).mkdir(parents=True)
+        setup_exe = bytearray(70)
+        setup_exe[:2] = b"MZ"
+        struct.pack_into("<I", setup_exe, 60, 64)
+        setup_exe[64:] = b"PE\0\0\x64\xaa"
         self.files = {
             "EFI/Boot/BOOTAA64.EFI": b"synthetic ARM64 EFI",
             "Boot/BCD": b"synthetic BCD",
             "Sources/Boot.WIM": b"synthetic WinPE",
+            "Sources/Setup.exe": setup_exe,
+            "Sources/Setup.cfg": b"Setup source tree test fixture",
             "Sources/Install.WIM": b"synthetic install payload" * 1024,
             "Root file.txt": b"FAT32 long filename",
         }
@@ -217,6 +227,28 @@ int main(int argc, char **argv) {
         self.assertNotEqual(self.build().returncode, 0)
         self.assertFalse(self.output.exists())
 
+    def test_setup_logs_persist_and_export_without_writing_the_image(self):
+        image = self.work / "SetupLogs.img"
+        subprocess.run([self.binary, image, "logs"], check=True)
+        self.assertEqual(image.stat().st_size, 128 << 20)
+        root = f"{image}@@1048576"
+        subprocess.run([MTYPE, "-i", root, "::/WINIOS.LOG"], check=True)
+        mmd = Path(MTYPE).with_name("mmd")
+        mcopy = Path(MTYPE).with_name("mcopy")
+        if not (mmd.is_file() and mcopy.is_file()):
+            self.skipTest("mtools write utilities are unavailable")
+        subprocess.run([mmd, "-i", root, "::/Logs"], check=True)
+        log = self.work / "launcher.log"
+        log.write_text("setup.exe exit code: -2147024809\n")
+        subprocess.run([mcopy, "-i", root, log, "::/Logs/launcher.log"], check=True)
+        mtime = image.stat().st_mtime_ns
+        subprocess.run([self.binary, image, "logs"], check=True)
+        folder = self.work / "export"
+        folder.mkdir()
+        subprocess.run([self.binary, image, folder, "export-logs"], check=True)
+        self.assertEqual((folder / "launcher.log").read_text(), log.read_text())
+        self.assertEqual(image.stat().st_mtime_ns, mtime)
+
     def test_existing_installer_remains_untouched(self):
         self.make_iso("-udf")
         self.output.write_bytes(b"existing")
@@ -316,10 +348,24 @@ EFI_STATUS efi_main(void *image, void *system_table) {
         runner = self.work / "prepare.c"
         runner.write_text(r"""
 #include <stdio.h>
+#include <string.h>
 #include "installer_winpe.h"
+
+static int cancel_plan(uint64_t copied, uint64_t total, void *context) {
+    (void)copied;
+    (void)total;
+    (void)context;
+    return 1;
+}
 
 int main(int argc, char **argv) {
     char error[256] = {0};
+    if (argc == 5) {
+        int result = winios_build_installer_disk(argv[1], argv[4], argv[3], NULL, NULL,
+                                                 cancel_plan, NULL, error, sizeof(error));
+        if (result) fprintf(stderr, "%s\n", error);
+        return !(result && strstr(error, "cancelled"));
+    }
     int result = winios_prepare_winpe_wim(argv[1], argv[2], NULL, NULL, error, sizeof(error));
     if (!result && argc == 7)
         result = winios_build_installer_disk(argv[1], argv[4], argv[3], argv[5], argv[6], NULL, NULL, error, sizeof(error));
@@ -357,7 +403,14 @@ int main(int argc, char **argv) {
         self.assertIsNotNone(boot, info)
         subprocess.run([imagex, "extract", patched, boot[1], "/Windows/System32/winios-setup.cmd",
                         f"--dest-dir={staging}"], stdout=subprocess.DEVNULL, check=True)
-        self.assertIn("/InstallFrom", (staging / "winios-setup.cmd").read_text())
+        script = (staging / "winios-setup.cmd").read_text()
+        self.assertIn("setup.exe exit code:", script)
+        self.assertIn("/CopyLogs", script)
+        self.assertIn("Windows\\Panther", script)
+        plan = subprocess.run([binary, os.environ["WINDOWS_24H2_ARM64_ISO"], staging, patched, self.output],
+                              capture_output=True)
+        self.assertEqual(plan.returncode, 0, plan.stderr.decode())
+        self.assertFalse(self.output.exists())
 
     @unittest.skipUnless(os.environ.get("WIMLIB_HEADER") and os.environ.get("WIMLIB_LIBRARY")
                          and os.environ.get("WIMLIB_IMAGEX"), "host wimlib is unavailable")
@@ -393,6 +446,9 @@ int main(int argc, char **argv) {
         self.assertIn(b"test content for netkvm.sys", partition)
         self.assertIn(b"test content for netkvmp.exe", partition)
         self.assertIn(b"<unattend>test</unattend>", partition)
+        self.assertIn(bytes(self.files["Sources/Setup.exe"]), partition)
+        self.assertIn(self.files["Sources/Setup.cfg"], partition)
+        self.assertIn("WINIOS.V2", self.exfat_root_names())
         target = self.work / "target.img"
         with target.open("wb") as disk:
             disk.truncate(64 << 30)
@@ -416,7 +472,10 @@ int main(int argc, char **argv) {
         ], stdout=subprocess.DEVNULL, check=True)
         self.assertIn(b"cmd.exe", next(subtree.rglob("winpeshl.ini")).read_bytes())
         script = next(subtree.rglob("winios-setup.cmd")).read_bytes()
-        self.assertIn(b"/InstallFrom", script)
+        self.assertIn(b'pushd "%MEDIA%\\sources"', script)
+        self.assertIn(b'set "SETUP_RC=%ERRORLEVEL%"', script)
+        self.assertIn(b"goto manual", script)
+        self.assertIn(b"/CopyLogs", script)
         self.assertIn(b"/InstallDrivers", script)
         self.assertIn(b"WINIOS.MEDIA", script)
         self.assertNotIn(b"Bypass", script)

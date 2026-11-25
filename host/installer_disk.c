@@ -128,7 +128,7 @@ static void gpt_header(uint8_t *sector, uint64_t current, uint64_t backup, uint6
     write_le(sector + 16, gpt_crc(sector, 92), 4);
 }
 
-static int write_gpt(uint64_t last_sector) {
+static int write_gpt(uint64_t last_sector, bool logs_only) {
     static const uint8_t esp_guid[16] = {0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
                                          0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b};
     static const uint8_t basic_data_guid[16] = {0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44,
@@ -142,10 +142,10 @@ static int write_gpt(uint64_t last_sector) {
     mbr[510] = 0x55;
     mbr[511] = 0xaa;
 
-    for (unsigned i = 0; i < 2; ++i) {
+    for (unsigned i = 0; i < (logs_only ? 1u : 2u); ++i) {
         uint8_t *entry = table + i * 128;
-        const char *name = i ? "Windows Images" : "Windows PE";
-        memcpy(entry, i ? basic_data_guid : esp_guid, 16);
+        const char *name = logs_only ? "Setup Diagnostics" : (i ? "Windows Images" : "Windows PE");
+        memcpy(entry, logs_only || i ? basic_data_guid : esp_guid, 16);
         random_guid(entry + 16);
         write_le(entry + 32, volumes[i].start, 8);
         write_le(entry + 40, volumes[i].start + volumes[i].sectors - 1, 8);
@@ -172,6 +172,7 @@ typedef struct InstallerBuild {
     unsigned payloads;
     bool boot_loader;
     bool boot_wim;
+    bool setup_program;
     bool boot_bcd;
     int boot_wim_fd;
     uint64_t boot_wim_size;
@@ -206,7 +207,7 @@ static int stream_file(InstallerBuild *build, DiscFile *input, int input_fd, con
     while (length) {
         UINT piece = length < COPY_BUFFER ? (UINT)length : COPY_BUFFER;
         UINT written = 0;
-        if (input ? disc_file_read(input, build->buffer, piece) != (ssize_t)piece
+        if (input ? disc_file_pread(input, build->buffer, piece, offset) != (ssize_t)piece
                   : transfer(input_fd, build->buffer, piece, offset, false) != 0) {
             result = fail(build, "A file inside the installation ISO is incomplete.");
             break;
@@ -238,6 +239,26 @@ static bool safe_name(const char *name) {
     return true;
 }
 
+/* WinPE boots from FAT32. In the modern layout Windows Setup runs from the
+ * complete exFAT source tree, with the already loaded boot.wim kept on FAT32. */
+static unsigned installer_destinations(const InstallerBuild *build, const char *path, bool image, bool boot_wim) {
+    if (build->boot_wim_fd < 0) return image ? 2 : 1;
+    if (boot_wim) return 1;
+    if (!strncasecmp(path, "/boot/", 6) || !strncasecmp(path, "/efi/", 5) ||
+        !strcasecmp(path, "/bootmgr") || !strcasecmp(path, "/bootmgr.efi"))
+        return 3;
+    return 2;
+}
+
+static bool installer_setup_is_arm64(DiscFile *file) {
+    uint8_t dos[64], pe[6];
+    if (disc_file_pread(file, dos, sizeof dos, 0) != sizeof dos || memcmp(dos, "MZ", 2)) return false;
+    uint32_t offset = 0;
+    for (unsigned i = 0; i < 4; ++i) offset |= (uint32_t)dos[60 + i] << (8 * i);
+    return offset >= sizeof dos && disc_file_pread(file, pe, sizeof pe, offset) == sizeof pe &&
+           !memcmp(pe, "PE\0\0\x64\xaa", sizeof pe);
+}
+
 static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, int depth, bool copying) {
     if (depth >= MAX_DEPTH) return fail(build, "An installer directory is nested too deeply.");
     DiscEntry entry;
@@ -250,7 +271,16 @@ static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, i
         int count = snprintf(path, sizeof(path), "0:%s/%s", prefix, entry.name);
         if (count < 0 || (size_t)count >= sizeof(path)) return fail(build, "An installer path is too long.");
         if (entry.type == DISC_DIR) {
-            if (copying && f_mkdir(path) != FR_OK) return fail(build, "An installer folder could not be created.");
+            if (copying) {
+                if (f_mkdir(path) != FR_OK) return fail(build, "An installer folder could not be created.");
+                if (build->boot_wim_fd >= 0) {
+                    path[0] = '1';
+                    FRESULT folder = f_mkdir(path);
+                    if (folder != FR_OK && (folder != FR_EXIST || strcasecmp(path + 2, "/sources")))
+                        return fail(build, "A Setup source folder could not be created on the payload volume.");
+                    path[0] = '0';
+                }
+            }
             DiscDirectory *child = disc_opendir_at(dir, entry.name);
             if (!child) return fail(build, "An installer folder could not be read.");
             int result = walk(build, child, path + 2, depth + 1, copying);
@@ -267,27 +297,38 @@ static int walk(InstallerBuild *build, DiscDirectory *dir, const char *prefix, i
         bool use_prepared_wim = is_boot_wim && build->boot_wim_fd >= 0;
         int64_t length = use_prepared_wim ? (int64_t)build->boot_wim_size : disc_file_size(file);
         int result = 0;
+        unsigned destinations = installer_destinations(build, path + 2, payload, is_boot_wim);
         if (length < 0 || (!use_prepared_wim && (uint64_t)length > build->iso_size)) {
             result = fail(build, "An installer file size exceeds the ISO.");
-        } else if (!payload && (uint64_t)length > UINT32_MAX) {
+        } else if ((destinations & 1u) && (uint64_t)length > UINT32_MAX) {
             result = fail(build, "A file needed on the FAT32 boot partition exceeds 4 GiB.");
-        } else if (copying && (uint64_t)length > build->total - build->copied) {
-            result = fail(build, "The source changed during installer preparation.");
-        } else if (copying) {
-            if (payload) path[0] = '1';
-            result = stream_file(build, use_prepared_wim ? NULL : file, build->boot_wim_fd, path, (uint64_t)length);
-        } else if ((uint64_t)length > 2 * build->iso_size - build->total ||
-                   align_up((uint64_t)length, PAYLOAD_CLUSTER) >
-                       (uint64_t)INT64_MAX / 2 - build->planned[0] - build->planned[1]) {
-            result = fail(build, "The combined installer files are too large for this ISO.");
         } else {
-            build->planned[payload] += align_up((uint64_t)length, payload ? PAYLOAD_CLUSTER : BOOT_CLUSTER);
-            build->total += (uint64_t)length;
-            if (payload) ++build->payloads;
-            if (!strcasecmp(path + 2, "/efi/boot/bootaa64.efi")) build->boot_loader = length > 0;
-            if (is_boot_wim) build->boot_wim = length > 0;
-            if (!strcasecmp(path + 2, "/efi/microsoft/boot/bcd") ||
-                !strcasecmp(path + 2, "/boot/bcd")) build->boot_bcd = length > 0;
+            for (unsigned i = 0; i < 2 && !result; ++i) {
+                if (!(destinations & (1u << i))) continue;
+                if (copying) {
+                    if ((uint64_t)length > build->total - build->copied) {
+                        result = fail(build, "The source changed during installer preparation.");
+                        break;
+                    }
+                    path[0] = '0' + (char)i;
+                    result = stream_file(build, use_prepared_wim ? NULL : file, build->boot_wim_fd, path, (uint64_t)length);
+                } else if ((uint64_t)length > 2 * build->iso_size - build->total ||
+                           align_up((uint64_t)length, PAYLOAD_CLUSTER) >
+                               (uint64_t)INT64_MAX / 2 - build->planned[0] - build->planned[1]) {
+                    result = fail(build, "The combined installer files are too large for this ISO.");
+                } else {
+                    build->planned[i] += align_up((uint64_t)length, i ? PAYLOAD_CLUSTER : BOOT_CLUSTER);
+                    build->total += (uint64_t)length;
+                }
+            }
+            if (!copying) {
+                if (payload) ++build->payloads;
+                if (!strcasecmp(path + 2, "/efi/boot/bootaa64.efi")) build->boot_loader = length > 0;
+                if (is_boot_wim) build->boot_wim = length > 0;
+                if (!strcasecmp(path + 2, "/efi/microsoft/boot/bcd") ||
+                    !strcasecmp(path + 2, "/boot/bcd")) build->boot_bcd = length > 0;
+                if (!strcasecmp(path + 2, "/sources/setup.exe")) build->setup_program = installer_setup_is_arm64(file);
+            }
         }
         disc_file_close(file);
         if (result) return result;
@@ -365,6 +406,10 @@ static int format_partitions(InstallerBuild *build, FATFS *boot, FATFS *payload)
     FIL marker;
     if (f_open(&marker, "1:/WINIOS.MEDIA", FA_CREATE_NEW | FA_WRITE) != FR_OK || f_close(&marker) != FR_OK)
         return fail(build, "The installer payload marker could not be written.");
+    if (build->boot_wim_fd >= 0) {
+        if (f_open(&marker, "1:/WINIOS.V2", FA_CREATE_NEW | FA_WRITE) != FR_OK || f_close(&marker) != FR_OK)
+            return fail(build, "The Setup layout marker could not be written.");
+    }
     return 0;
 }
 
@@ -406,6 +451,10 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
         fail(&build, "The ISO needs an ARM64 EFI loader, boot configuration, WinPE and exactly one install image.");
         goto done;
     }
+    if (build.boot_wim_fd >= 0 && !build.setup_program) {
+        fail(&build, "The ISO payload is missing a valid ARM64 sources/setup.exe.");
+        goto done;
+    }
     if (note_progress(&build)) goto done;
 
     size_t name_size = strlen(output_path) + sizeof(".building.XXXXXX");
@@ -436,7 +485,7 @@ int winios_build_installer_disk(const char *iso_path, const char *output_path, c
                                       align_up(payload_bytes, ALIGNMENT * SECTOR) / SECTOR};
     uint64_t last_sector = volumes[1].start + volumes[1].sectors + GPT_TABLE_SECTORS;
     if (last_sector >= INT64_MAX / SECTOR || ftruncate(image_fd, (off_t)((last_sector + 1) * SECTOR)) ||
-        write_gpt(last_sector)) {
+        write_gpt(last_sector, false)) {
         fail(&build, "The sparse GPT installer disk could not be written.");
         goto done;
     }
@@ -561,7 +610,8 @@ int winios_configure_installer_answer(const char *installer, const char *primary
     if (start <= boot_end || start >= sectors || last < start || last >= sectors) goto done;
     volumes[1] = (InstallerPartition){start, last - start + 1};
     if (f_mount(&payload, "1:", 1) != FR_OK || f_stat("1:/WINIOS.MEDIA", &answer) != FR_OK) goto done;
-    if (allow && f_stat("1:/WINIOS-SETUP.XML", &answer) == FR_OK && answer.fsize > 0) {
+    if (allow && f_stat("1:/WINIOS.V2", &answer) == FR_OK &&
+        f_stat("1:/WINIOS-SETUP.XML", &answer) == FR_OK && answer.fsize > 0) {
         if (f_open(&marker, "1:/WINIOS.AUTO", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK ||
             f_close(&marker) != FR_OK) goto done;
     } else {
@@ -575,4 +625,130 @@ done:
     image_fd = -1;
     pthread_mutex_unlock(&volume_lock);
     return result;
+}
+
+enum { SETUP_LOG_SECTORS = (128 << 20) / SECTOR };
+
+static bool mount_setup_logs(FATFS *volume) {
+    struct stat info;
+    uint8_t header[SECTOR], table[GPT_TABLE_SECTORS * SECTOR];
+    if (image_fd < 0 || fstat(image_fd, &info) || !S_ISREG(info.st_mode) ||
+        info.st_size != (off_t)SETUP_LOG_SECTORS * SECTOR ||
+        transfer(image_fd, header, sizeof header, SECTOR, false) ||
+        transfer(image_fd, table, sizeof table, 2 * SECTOR, false) ||
+        memcmp(header, "EFI PART", 8) || field_le(header + 12, 4) != 92 ||
+        field_le(header + 72, 8) != 2 || field_le(header + 80, 4) != 128 ||
+        field_le(header + 84, 4) != 128 ||
+        field_le(header + 88, 4) != gpt_crc(table, sizeof table)) return false;
+    uint32_t crc = (uint32_t)field_le(header + 16, 4);
+    memset(header + 16, 0, 4);
+    if (crc != gpt_crc(header, 92)) return false;
+    uint64_t start = field_le(table + 32, 8);
+    uint64_t last = field_le(table + 40, 8);
+    if (start != ALIGNMENT || last != SETUP_LOG_SECTORS - GPT_TABLE_SECTORS - 2) return false;
+    volumes[0] = (InstallerPartition){start, last - start + 1};
+    FILINFO marker;
+    return f_mount(volume, "0:", 1) == FR_OK && f_stat("0:/WINIOS.LOG", &marker) == FR_OK &&
+           !(marker.fattrib & AM_DIR);
+}
+
+int winios_prepare_setup_logs(const char *path) {
+    if (!path) return -1;
+    pthread_mutex_lock(&volume_lock);
+    FATFS volume;
+    int result = -1;
+    char *stage = NULL;
+    image_fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (image_fd >= 0) {
+        image_readonly = true;
+        if (mount_setup_logs(&volume)) result = 0;
+        goto done;
+    }
+    if (errno != ENOENT || asprintf(&stage, "%s.building.XXXXXX", path) < 0) goto done;
+    image_fd = mkstemp(stage);
+    if (image_fd < 0) goto done;
+    volumes[0] = (InstallerPartition){ALIGNMENT, SETUP_LOG_SECTORS - ALIGNMENT - GPT_TABLE_SECTORS - 1};
+    MKFS_PARM fat32 = {.fmt = FM_FAT32 | FM_SFD, .n_fat = 2, .au_size = SECTOR};
+    uint8_t buffer[4096];
+    FIL marker;
+    if (ftruncate(image_fd, (off_t)SETUP_LOG_SECTORS * SECTOR) ||
+        write_gpt(SETUP_LOG_SECTORS - 1, true) ||
+        f_mkfs("0:", &fat32, buffer, sizeof buffer) != FR_OK ||
+        f_mount(&volume, "0:", 1) != FR_OK ||
+        f_open(&marker, "0:/WINIOS.LOG", FA_CREATE_NEW | FA_WRITE) != FR_OK ||
+        f_close(&marker) != FR_OK || fsync(image_fd)) goto done;
+    result = link(stage, path);
+done:
+    f_mount(NULL, "0:", 0);
+    if (image_fd >= 0) close(image_fd);
+    if (stage) unlink(stage);
+    free(stage);
+    image_fd = -1;
+    image_readonly = false;
+    pthread_mutex_unlock(&volume_lock);
+    return result;
+}
+
+static int export_log_file(const char *folder, const FILINFO *info) {
+    char input[PATH_LENGTH], output[PATH_LENGTH];
+    if (snprintf(input, sizeof input, "0:/Logs/%s", info->fname) >= (int)sizeof input ||
+        snprintf(output, sizeof output, "%s/%s", folder, info->fname) >= (int)sizeof output) return -1;
+    FIL file;
+    if (f_open(&file, input, FA_READ) != FR_OK) return -1;
+    int fd = open(output, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    int result = 0;
+    uint8_t bytes[16384];
+    uint64_t copied = 0;
+    while (fd >= 0 && copied < info->fsize) {
+        UINT count = info->fsize - copied > sizeof bytes ? sizeof bytes : (UINT)(info->fsize - copied);
+        UINT read;
+        if (f_read(&file, bytes, count, &read) != FR_OK || read != count ||
+            transfer(fd, bytes, read, copied, true)) {
+            result = -1;
+            break;
+        }
+        copied += read;
+    }
+    f_close(&file);
+    if (fd < 0) return -1;
+    if (close(fd)) result = -1;
+    if (result) unlink(output);
+    return result;
+}
+
+int winios_export_setup_logs(const char *path, const char *folder) {
+    if (!path || !folder) return -1;
+    pthread_mutex_lock(&volume_lock);
+    FATFS volume;
+    DIR directory;
+    FILINFO file;
+    int count = -1;
+    uint64_t total = 0;
+    image_fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    image_readonly = true;
+    if (!mount_setup_logs(&volume)) goto done;
+    FRESULT status = f_opendir(&directory, "0:/Logs");
+    if (status == FR_NO_PATH || status == FR_NO_FILE) { count = 0; goto done; }
+    if (status != FR_OK) goto done;
+    count = 0;
+    while ((status = f_readdir(&directory, &file)) == FR_OK && file.fname[0]) {
+        const char *suffix = strrchr(file.fname, '.');
+        if ((file.fattrib & AM_DIR) || !safe_name(file.fname) || !suffix ||
+            (strcasecmp(suffix, ".log") && strcasecmp(suffix, ".txt"))) continue;
+        if (file.fsize > (128u << 20) - total || count >= 128 || export_log_file(folder, &file)) {
+            count = -1;
+            break;
+        }
+        total += file.fsize;
+        ++count;
+    }
+    if (status != FR_OK) count = -1;
+    f_closedir(&directory);
+done:
+    f_mount(NULL, "0:", 0);
+    if (image_fd >= 0) close(image_fd);
+    image_fd = -1;
+    image_readonly = false;
+    pthread_mutex_unlock(&volume_lock);
+    return count;
 }

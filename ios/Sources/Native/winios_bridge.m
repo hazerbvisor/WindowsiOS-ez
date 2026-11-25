@@ -64,6 +64,9 @@ static NSString *processEntitlementStatus(void) {
     dispatch_source_t _diagTimer;
     CFAbsoluteTime _bootStartTime;
     uint64_t _configuredRamMB;
+    uint64_t _requestedRamMB;
+    uint64_t _requestedJITMB;
+    uint64_t _allocatedRamMB;
     int _configuredCPUs;
     CAMetalLayer *__weak _pendingLayer;
     uint64_t _diagTickCount;
@@ -216,7 +219,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter jitMiB:(uint64_t)jitMiB ramMiB:(uint64_t)ramMiB {
-    if (jitMiB == 0 || jitMiB > self.maximumJITMiB) return NO;
+    if (jitMiB == 0 || jitMiB > self.maximumJITMiB || _engineUsed) return NO;
+    _requestedRamMB = ramMiB;
+    _requestedJITMB = jitMiB;
     BOOL ok = winios_jit_acquire((size_t)jitMiB << 20, ramMiB, detachAfter);
     dispatch_async(_diagQueue, ^{
         [self writeDiagnosticsSnapshot];
@@ -378,14 +383,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    if (!self.isJITLive) {
-        [self tryAcquireJIT:YES jitMiB:jitMiB ramMiB:ramMiB];
-        if (!self.isJITLive) {
-            [self reportStartFailure:self.jitStatusText];
-            return;
-        }
-    }
-
+    _requestedRamMB = ramMiB;
+    _requestedJITMB = jitMiB;
     NSString *dir = directory ?: [self machineDirectory];
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL hasRaw = [self hasRawDiskImageAt:dir];
@@ -394,6 +393,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"vars.fd"]] ||
         (!hasRaw && ![fm fileExistsAtPath:src])) {
         [self reportStartFailure:@"This machine needs UEFI firmware, writable NVRAM and a prepared Windows disk."];
+        return;
+    }
+    if (![self tryAcquireJIT:YES jitMiB:jitMiB ramMiB:ramMiB]) {
+        [self reportStartFailure:self.jitStatusText];
         return;
     }
     if (!hasRaw) {
@@ -444,11 +447,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         uint64_t physicalMiB = NSProcessInfo.processInfo.physicalMemory >> 20;
         uint64_t availableMiB = [self availableMemoryMB];
         BOOL fitsPreallocation = preallocRam && ramMiB <= (preallocBytes >> 20);
-        BOOL fitsProcessBudget = availableMiB > 768 && ramMiB <= availableMiB - 768;
-        if (ramMiB < 4096 || ramMiB >= physicalMiB || (!fitsPreallocation && !fitsProcessBudget)) {
+        BOOL fitsProcessBudget = winios_guest_ram_fits(ramMiB, availableMiB);
+        if (!winios_guest_ram_fits(ramMiB, physicalMiB) || (!fitsPreallocation && !fitsProcessBudget)) {
             [self reportStartFailure:[NSString stringWithFormat:
-                @"Cannot safely start with %llu MiB of guest RAM. The process reports %llu MiB available. Edit the configuration and choose Automatic to use the existing device-based fallback.",
-                ramMiB, availableMiB]];
+                @"Cannot start with %llu MiB guest RAM. Physical: %llu MiB; process headroom: %llu MiB; ledger reservation: %llu MiB. %s",
+                ramMiB, physicalMiB, availableMiB, preallocBytes >> 20, winios_jit_ram_status_text()]];
             return;
         }
         ramMB = ramMiB;
@@ -511,11 +514,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         }
     }
 
+    NSString *setupLogs = installer ? [dir stringByAppendingPathComponent:@"SetupLogs.img"] : nil;
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
         .disk1 = installer ? installer.fileSystemRepresentation : NULL,
+        .setup_logs_disk = setupLogs.fileSystemRepresentation,
         .tpm_state_directory = tpmState ? tpmState.fileSystemRepresentation : NULL,
         .share_dir = sharedDir.fileSystemRepresentation,
         .share_sock = shareSock.fileSystemRepresentation,
@@ -532,6 +537,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     };
 
     char err[256] = {0};
+    if (ramMiB && !preallocRam) setenv("HV_RAM_NO_LEDGER", "1", 1);
     _engineUsed = YES;
     if (hv_winvm_create(&cfg, err, sizeof err) != 0) {
         _vmStatus = [NSString stringWithFormat:@"VM create failed: %s Close and reopen the app before retrying. If RAM allocation failed, choose Automatic in the machine settings.", err];
@@ -540,6 +546,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
+    _allocatedRamMB = ramMB;
     CAMetalLayer *layer = _pendingLayer;
     if (layer) {
         hv_winvm_set_display_layer((__bridge void *)layer);
@@ -662,7 +669,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"jit_status: %@\n"
         @"uptime_sec: %.1f\n"
         @"cpus: %d\n"
-        @"ram_mb: %llu\n"
+        @"requested_ram_mib: %llu\n"
+        @"requested_jit_mib: %llu\n"
+        @"mapped_jit_mib: %zu\n"
+        @"guest_ram_reservation: %s\n"
+        @"configured_ram_mib: %llu\n"
+        @"allocated_ram_mib: %llu\n"
         @"avail_mem_mb: %llu\n"
         @"physical_mem_mb: %llu\n"
         @"memory_warning_count: %llu\n"
@@ -688,7 +700,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         self.jitStatusText ?: @"",
         uptime,
         _configuredCPUs,
+        _requestedRamMB,
+        _requestedJITMB,
+        winios_jit_mapping().size >> 20,
+        winios_jit_ram_status_text(),
         _configuredRamMB,
+        _allocatedRamMB,
         [self availableMemoryMB],
         (unsigned long long)(NSProcessInfo.processInfo.physicalMemory >> 20),
         (unsigned long long)atomic_load_explicit(&_memoryWarnings, memory_order_relaxed),

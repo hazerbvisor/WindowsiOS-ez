@@ -17,12 +17,16 @@ static int open_split(HvJitRegion *region, size_t bytes) {
     vm_address_t rw = 0;
     vm_prot_t cur, max;
     if (vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(), (vm_address_t)rx, FALSE, &cur, &max,
-                 VM_INHERIT_NONE) != KERN_SUCCESS ||
-        mprotect(rx, bytes, PROT_READ | PROT_EXEC) != 0) {
+                 VM_INHERIT_NONE) != KERN_SUCCESS) {
         munmap(rx, bytes);
         return -1;
     }
-    if (hv_jit_region_attach(region, rx, (void *)rw, bytes) != 0) return -1;
+    if (mprotect(rx, bytes, PROT_READ | PROT_EXEC) != 0 ||
+        hv_jit_region_attach(region, rx, (void *)rw, bytes) != 0) {
+        vm_deallocate(mach_task_self(), rw, bytes);
+        munmap(rx, bytes);
+        return -1;
+    }
     region->owned = 1;
     return 0;
 }
@@ -44,9 +48,13 @@ int hv_jit_region_open(HvJitRegion *region, size_t bytes) {
 
 int hv_jit_region_attach(HvJitRegion *region, void *rx, void *rw, size_t bytes) {
     memset(region, 0, sizeof *region);
-    if (!rx || !rw || bytes < 4096) return -1;
+    uintptr_t executable = (uintptr_t)rx, writable = (uintptr_t)rw;
+    uintptr_t delta = writable >= executable ? writable - executable : executable - writable;
+    if (!rx || !rw || bytes < 4096 || bytes % sizeof(uint32_t) || delta > INTPTR_MAX ||
+        bytes - 1 > UINTPTR_MAX - executable || bytes - 1 > UINTPTR_MAX - writable)
+        return -1;
     region->base = rx;
-    region->rw_diff = (intptr_t)((uint8_t *)rw - (uint8_t *)rx);
+    region->rw_diff = writable >= executable ? (intptr_t)delta : -(intptr_t)delta;
     region->capacity = bytes / sizeof(uint32_t);
     return 0;
 }
@@ -54,7 +62,7 @@ int hv_jit_region_attach(HvJitRegion *region, void *rx, void *rw, size_t bytes) 
 void hv_jit_region_close(HvJitRegion *region) {
     if (region->owned && region->base) {
         size_t bytes = region->capacity * sizeof(uint32_t);
-        if (region->rw_diff) munmap((uint8_t *)region->base + region->rw_diff, bytes);
+        if (region->rw_diff) munmap(hv_jit_writable_address(region, region->base), bytes);
         munmap(region->base, bytes);
     }
     memset(region, 0, sizeof *region);
@@ -70,7 +78,7 @@ void hv_jit_write(HvJitRegion *region, uint32_t *start, const void *src, size_t 
 #if TARGET_OS_OSX
         if (!region->rw_diff) pthread_jit_write_protect_np(0);
 #endif
-        __atomic_store_n((uint32_t *)((uint8_t *)start + region->rw_diff), word, __ATOMIC_RELEASE);
+        __atomic_store_n((uint32_t *)hv_jit_writable_address(region, start), word, __ATOMIC_RELEASE);
         return;
     }
     if (region->rw_diff) {

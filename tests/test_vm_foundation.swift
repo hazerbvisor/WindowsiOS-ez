@@ -270,7 +270,8 @@ enum VMFoundationTests {
         let bytes = try WindowsUnattend.make(imageIndex: 6)
         let xml = String(decoding: bytes, as: UTF8.self)
         precondition(xml.contains("<Key>/IMAGE/INDEX</Key><Value>6</Value>"))
-        precondition(xml.contains("<WillWipeDisk>false</WillWipeDisk>"))
+        precondition(xml.contains("<WillShowUI>Always</WillShowUI>"))
+        precondition(!xml.contains("DiskID") && !xml.contains("InstallTo") && !xml.contains("DiskConfiguration"))
         precondition(!xml.contains("UserAccounts") && !xml.contains("AcceptEula") && !xml.contains("Bypass"))
     }
 

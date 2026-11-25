@@ -25,7 +25,7 @@ Use a physical iPad Air M4 on iPadOS 27.0.1 and record the actual model, detecte
 6. Export `boot_status.txt` through Files after checking it for details you wish to redact. Record physical RAM, process headroom, virtual and resident size, physical footprint, memory warnings, actual guest RAM and JIT capacity. Share screenshots of the guest only after checking for personal content. Keep pairing records and signing credentials local.
 7. Test sparse import with a broken archive and with a valid raw disk already present. Verify the archive stays in place and the existing disk remains unchanged. Collect file logical size and allocated size separately.
 
-Once the larger configurations and installer are implemented, test each preset in order, exercise sustained guest load and JIT flushes, and record allocator rejection and fallback behavior. Test provisioning with an interruption at each stage, including during download, disk preparation, DISM, EFI setup and the first guest boot. Record the last completed stage and resulting disk state.
+Exercise sustained guest load and record JIT flushes, memory pressure and allocation failures. Test interruptions during download, disk preparation, Windows Setup and first guest boot. Record the last completed stage and resulting disk state.
 
 Report status separately as implemented, static validation passed, compilation passed, simulator tested, physical device tested or unverified. A locally validated archive fixture establishes verifier behavior. An actual device build and a device run establish the corresponding binary and runtime results.
 
@@ -37,10 +37,10 @@ On the signed physical device, run the prepared-disk smoke test and then verify 
 
 1. Import a known-good machine folder in **Virtual Machines**. Verify the legacy Files path remains selectable. Rename the managed VM, edit its hardware, duplicate it, export a stopped copy to Files and reimport it. Check the copies have separate writable firmware and that declining deletion preserves them.
 2. Verify the power-button action follows Windows’ configured power policy. Shut the guest down from Windows. Reopen the app before launching another VM. Verify active disk images are protected from management operations.
-3. Try the Compatibility preset and an affordable Custom setting at or below 384 MiB. Start each larger preset from a fresh app process so the app can request its configured JIT mapping. Start with Balanced then Performance before Experimental. Record each allocation and the executable self-test, including any rejection with a compatibility fallback. Track physical footprint, memory warnings and cache flushes during sustained Windows load.
+3. Run the independent RAM and JIT matrix below. Start with the Compatibility preset. Quit the app between rows so the next VM can request its own mapping. Select the VM before enabling the debugger.
 4. Import a legitimate 26100 ARM64 ISO and verify other builds, x64 and malformed images are rejected. Test the supplied authoritative checksum and a mismatch. Download the same ISO with a deliberately incorrect checksum, relaunch the app, and use **Export ISO**. Provide the correct checksum in Downloads and use **Revalidate ISO**. Confirm no new network transfer starts. Verify filesystem and parser details can be shared. Test pause, backgrounding, network interruption, relaunch and resume with a server that supports byte ranges. Verify explicit removal requires confirmation.
 5. Select the ISO, configure memory, JIT cache and storage, then press **Install**. Leave Advanced Settings at its defaults. Test reopening the draft before and during preparation. Confirm the app publishes one VM with independent firmware and a sparse image. Repeat with a second VM and check that its firmware changes do not affect the first. Compare logical capacity with allocated bytes.
-6. Choose **Start Windows Setup** on the blank machine. Record whether EDK2 finds the installer and whether WinPE locates the exFAT payload. Select an edition in the wizard for the initial blank-disk path. Verify Setup targets only the writable primary disk, then interrupt a disposable run after partitioning and verify the next launch falls back to interactive Setup. Capture any Secure Boot or TPM rejection. With compatible firmware, check Secure Boot in Windows System Information and TPM 2.0 in Windows Security. Verify Windows accepts the bundled NetKVM catalog, the NIC starts and Windows can obtain a network connection. Record the driver version and Windows signature state.
+6. Choose **Start Windows Setup** on the blank machine. Record whether EDK2 finds the installer and whether WinPE locates the exFAT payload. Select an edition in the wizard for the initial blank-disk path. Choose the unallocated primary drive with the configured capacity. The Setup medium and 128 MiB diagnostics disk are separate devices. Interrupt a disposable run after partitioning and verify the next launch falls back to interactive Setup. Capture any Secure Boot or TPM rejection. With compatible firmware, check Secure Boot in Windows System Information and TPM 2.0 in Windows Security. Verify Windows accepts the bundled NetKVM catalog, the NIC starts and Windows can obtain a network connection. Record the driver version and Windows signature state.
 7. After Setup has completed and the guest has shut down, use **Use Installed Windows Disk**. Verify it rejects a blank disk. For an installed disk, check the app detects the ARM64 boot manager and BCD. Relaunch the app, boot the primary disk, and complete standard OOBE and activation. Verify removal of the generated installer leaves the separate ISO intact. Save and reimport a local TPM-backed VM backup and verify the original TPM state survives.
 
 For the Linux installer tests, stage FatFs with `scripts/prepare_fatfs.sh` and set `FATFS_SOURCE_DIR`, `MTYPE` and `FSCK_EXFAT` along with the UDF fixture variables. Add `WIMLIB_HEADER`, `WIMLIB_LIBRARY` and `WIMLIB_IMAGEX` for the real-container WinPE test. These fixtures contain synthetic files, not proprietary Windows data.
@@ -63,3 +63,24 @@ The ARM64 UEFI integration test uses `QEMU_AARCH64`, `EDK2_FIRMWARE`, `EFI_CLANG
 4. Export a retained failed download and a non-TPM VM backup to Files. Confirm success and cancel both dismiss the picker. Revalidate the retained ISO without a network transfer.
 
 To enable the host 2.25 GiB ISO streaming test, set `WINDOWSIOS_TEST_LARGE_ISO=1` on Linux with GNU dd and at least 2.5 GiB of free workspace storage. The test creates a sparse synthetic source and checks that the managed copy validates with the same digest while the original digest stays unchanged. Files provider UI and iPad picker callbacks require the device pass above.
+
+
+## Critical installer and JIT retest
+
+Start each row in a fresh signed app process on the same iPad. Select the VM, attach the authorized debugger and check the executable self-test at both RX offsets. After a successful boot record requested and mapped JIT, guest RAM reservation and allocation, process headroom, footprint, memory warnings and cache flushes. Export `boot_status.txt` after a failed launch as well. Check runtime entitlement values for debugging, increased memory and extended virtual addressing.
+
+| Run | Guest RAM | JIT cache |
+| --- | ---: | ---: |
+| Compatibility | 4608 MiB | 384 MiB |
+| JIT only | 4608 MiB | 512 MiB |
+| RAM only | 6144 MiB | 384 MiB |
+| Performance | 8192 MiB | 1024 MiB |
+| Experimental | 10240 MiB | 1536 MiB |
+
+Host tests check these size combinations and mapping boundaries. They do not execute the TXM allocator or measure iPad memory pressure.
+
+For a VM created on an older app build, select **Update Windows Setup Disk** from the VM menu. It stages a replacement Setup disk and keeps a backup of the previous image. Run Setup with ARM64 Consumer media and IoT Enterprise LTSC media in separate disposable VMs. Select the unallocated primary disk by its configured size. After Setup returns a result, use **R** to restart once Setup has finished staging Windows. On failure choose **M** for interactive Setup without the optional answer file or driver flags. Use the stopped VM's **Export Windows Setup Logs** action to save `launcher.log`, disk enumeration, Panther logs and SetupAPI text logs. Review logs for guest details before sharing.
+
+Repeat the host WinPE/source-plan test with each media file by setting `WINDOWS_24H2_ARM64_ISO` and its measured or authoritative `WINDOWS_24H2_ARM64_SHA256`. The source-plan test validates ARM64 `sources/setup.exe` and reaches installer progress before cancelling to avoid duplicating the full ISO. The separate FAT32 diagnostics test verifies persistence and read-only export of a sample signed-decimal Setup exit code.
+
+After a device Setup run, check whether Windows enumerated TPM 2.0, report Secure Boot state and confirm the NetKVM provider and driver version in Device Manager. Check the SetupAPI log for driver selection and signature acceptance.

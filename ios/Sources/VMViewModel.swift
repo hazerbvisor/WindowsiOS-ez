@@ -95,7 +95,7 @@ final class VMViewModel: ObservableObject {
     private var bootDirectory: URL?
     private var bootInstaller: URL?
     private var bootUsesTPM = false
-    private var bootHardware = VMHardware()
+    private var bootHardware: VMHardware?
     private var oauthPollTimer: Timer? = nil
     private var clipboardTask: Task<Void, Never>?
 
@@ -248,7 +248,7 @@ final class VMViewModel: ObservableObject {
 
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
-        if !b.isJITLive && b.isDebuggerAttached {
+        if let bootHardware, !b.isJITLive && b.isDebuggerAttached {
             _ = b.tryAcquireJIT(detachAfter: true, jitMiB: UInt64(bootHardware.jitMiB),
                                 ramMiB: UInt64(bootHardware.ramMiB))
         }
@@ -265,6 +265,7 @@ final class VMViewModel: ObservableObject {
     }
 
     func startOrRetry() {
+        guard let bootHardware else { return }
         WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, useTPM: bootUsesTPM, ramMiB: UInt64(bootHardware.ramMiB),
                                   jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()

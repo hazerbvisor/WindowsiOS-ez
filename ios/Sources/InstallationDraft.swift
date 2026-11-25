@@ -87,7 +87,7 @@ struct InstallationDraftStore: Sendable {
     func installerURL(for draft: InstallationDraft, media: UUID) -> URL {
         let drivers = draft.driverID?.uuidString ?? InstallerAssets.networkDriverVersion
         let edition = draft.editionIndex.map(String.init) ?? "manual"
-        return root.appendingPathComponent("Installer-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
+        return root.appendingPathComponent("Installer-v2-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
     }
 
     func driversURL(for id: UUID) -> URL {
