@@ -10,6 +10,7 @@ enum {
     BASE = 0x40000000, SIZE = 0x18000, QSIZE = 32, CURSOR = 1,
     REQUEST = 0x4000, RESPONSE = 0x5000, DATA0 = 0x7000, DATA1 = 0x8000,
     CURSOR_DATA = 0x10000, MSI = 0x08090040,
+    ECAM = 0x30000000, WINDOW = 0x10000000, MODERN_BAR = 0x4000, MSIX_BAR = 0x10000,
     OK = 0x1100, BAD_PARAMETER = 0x1205
 };
 typedef struct Header {
@@ -23,7 +24,7 @@ typedef struct Used { uint32_t id, len; } Used;
 static _Alignas(4096) uint8_t memory[SIZE];
 static HvRam ram = {.pa = BASE, .size = SIZE, .host = memory};
 static HvMachine machine;
-static HvPcie bus;
+static HvPcie *bus;
 static HvPciDev *pci;
 struct HvGicIts { int sentinel; };
 static unsigned intx, msi;
@@ -55,12 +56,13 @@ int hv_fw_cfg_add_writable_file(HvFwCfg *fw, const char *name, uint32_t length,
 int hv_machine_add_mmio(HvMachine *m, uint64_t pa, uint64_t size, void *opaque,
                         uint64_t (*read)(void *, uint64_t, unsigned),
                         void (*write)(void *, uint64_t, uint64_t, unsigned), const char *name) {
-    (void)m; (void)pa; (void)size; (void)opaque; (void)read; (void)write; (void)name;
-    abort(); /* This fixture installs a real PCI device and calls its BAR callbacks directly. */
+    assert(m == &machine && m->nmmio < 2);
+    m->mmio[m->nmmio++] = (HvMmio){pa, size, opaque, read, write, name, 0};
+    return 0;
 }
 
 void hv_gicv3_set_irq(HvGic *gic, int line, int level) {
-    assert(gic == bus.gic && line == bus.intx_base + pci->slot);
+    assert(gic == bus->gic && line == bus->intx_base + pci->slot);
     intx = level;
 }
 
@@ -70,18 +72,30 @@ void hv_gicv3_pend(HvGic *gic, int line) {
 }
 
 int hv_gicv3_its_msi(HvGicIts *its, uint32_t device, uint32_t event) {
-    assert(its == bus.its && device == (uint32_t)(pci->slot << 3));
+    assert(its == bus->its && device == (uint32_t)(pci->slot << 3));
     msi++;
     msi_event = event;
     return 1;
 }
 
+static uint32_t read_ecam(uint32_t off, unsigned size) {
+    HvMmio *ecam = &machine.mmio[0];
+    return (uint32_t)ecam->read(ecam->opaque, (1 << 15) + off, size);
+}
+
+static void write_ecam(uint32_t off, uint64_t value, unsigned size) {
+    HvMmio *ecam = &machine.mmio[0];
+    ecam->write(ecam->opaque, (1 << 15) + off, value, size);
+}
+
 static uint32_t read_bar(uint32_t off, unsigned size) {
-    return (uint32_t)pci->bar_read(pci, 4, off, size);
+    HvMmio *window = &machine.mmio[1];
+    return (uint32_t)window->read(window->opaque, MODERN_BAR + off, size);
 }
 
 static void write_bar(uint32_t off, uint64_t value, unsigned size) {
-    pci->bar_write(pci, 4, off, value, size);
+    HvMmio *window = &machine.mmio[1];
+    window->write(window->opaque, MODERN_BAR + off, value, size);
 }
 
 static uint32_t qbase(int id) { return (uint32_t)id * 0x1000; }
@@ -293,16 +307,19 @@ static void malformed_and_limits(HvVirtioGpu *gpu) {
     assert(used_index(0) == before + 10 && read_bar(0x1000, 1) == 0);
     store16(0x400, 0);
 
-    pci->config[pci->msix_cap + 3] |= 0x80;
-    pci->msix_table[1] = (HvPciMsixEntry){.addr_lo = MSI, .data = 47};
+    HvMmio *window = &machine.mmio[1];
+    write_ecam(pci->msix_cap + 2, 0x8000, 2);
+    window->write(window->opaque, MSIX_BAR + 16, MSI, 4);
+    window->write(window->opaque, MSIX_BAR + 24, 47, 4);
+    window->write(window->opaque, MSIX_BAR + 28, 0, 4);
     assert(action(0x102, (uint32_t[8]){123}) == OK);
     assert(msi == 1 && msi_event == 47 && !intx);
-    pci->msix_table[1].ctrl = 1;
+    window->write(window->opaque, MSIX_BAR + 28, 1, 4);
     assert(action(0x102, (uint32_t[8]){4}) == OK);
-    assert(msi == 1 && pci->msix_pba == 2);
+    assert(msi == 1 && window->read(window->opaque, MSIX_BAR + 0x1000, 8) == 2);
     write_bar(0x14, 0, 1);
     assert(!pci->msix_pba && read_bar(0x14, 1) == 0);
-    pci->config[pci->msix_cap + 3] &= 0x7f;
+    write_ecam(pci->msix_cap + 2, 0, 2);
     features(0);
     setup_queues();
     cmd = (Command){.header={.type=0x10a}};
@@ -314,17 +331,29 @@ int main(void) {
     static HvGic gic;
     static HvGicIts its;
     static HvFwCfg fw;
-    bus = (HvPcie){.m = &machine, .gic = &gic, .intx_base = 35, .its = &its, .its_translater_pa = MSI};
+    bus = hv_pcie_create(&machine, &gic, ECAM, 1 << 20, WINDOW, 1 << 20, 35);
+    hv_pcie_set_its(bus, &its, MSI);
     HvFbDisplay *fb = hv_fb_display_create(&machine, &fw);
     const uint32_t config[] = {0, __builtin_bswap32(BASE + 0xc000), __builtin_bswap32(0x34325258),
                                0, __builtin_bswap32(64), __builtin_bswap32(64), __builtin_bswap32(256)};
     ramfb_write(ramfb_context, (const uint8_t *)config, sizeof config);
-    HvVirtioGpu *gpu = hv_virtio_gpu_create(&machine, &bus, fb);
+    assert(read_ecam(0, 4) == UINT32_MAX);
+    HvVirtioGpu *gpu = hv_virtio_gpu_create(&machine, bus, fb);
     assert(gpu);
-    for (int i = 0; i < HV_PCI_SLOTS && !pci; i++) pci = bus.dev[i];
-    assert(pci && pci->config[0] == 0xf4 && pci->config[1] == 0x1a &&
-           pci->config[2] == 0x50 && pci->config[3] == 0x10 && pci->config[0x2f] == 0x11);
-    assert(pci->bar_size[2] == 0x2000 && pci->bar_size[4] == 0x4000 && pci->msix_nvec == 3);
+    pci = bus->dev[1];
+    assert(pci && read_ecam(0, 4) == 0x10501af4 && read_ecam(0x2c, 4) == 0x11001af4);
+    uint32_t cap = read_ecam(0x34, 1);
+    assert(read_ecam(cap, 1) == 0x11 && (read_ecam(cap + 2, 2) & 0x7ff) == 2);
+    assert(read_ecam(cap + 4, 4) == 2 && read_ecam(cap + 8, 4) == 0x1002);
+    cap = read_ecam(cap + 1, 1);
+    assert(read_ecam(cap, 1) == 9 && read_ecam(cap + 3, 1) == 1 && read_ecam(cap + 4, 1) == 4);
+    write_ecam(0x18, UINT32_MAX, 4);
+    assert(read_ecam(0x18, 4) == 0xffffe004);
+    write_ecam(0x20, UINT32_MAX, 4);
+    assert(read_ecam(0x20, 4) == 0xffffc004);
+    write_ecam(0x18, WINDOW + MSIX_BAR, 4);
+    write_ecam(0x20, WINDOW + MODERN_BAR, 4);
+    write_ecam(4, 6, 2); /* Memory space and bus mastering */
 
     write_bar(0, 0, 4);
     assert(read_bar(4, 4) == 2); /* EDID only, no 3D feature flags */
@@ -351,10 +380,11 @@ int main(void) {
     assert(read_bar(0x14, 1) == (15 | 64));
 
     hv_virtio_gpu_destroy(gpu);
-    for (int i = 0; i < HV_PCI_SLOTS; i++) assert(!bus.dev[i]);
+    assert(read_ecam(0, 4) == UINT32_MAX);
     assert(check_frame(fb, 64, 64, (uint8_t[256]){0}) == 0);
     pthread_mutex_destroy(&fb->mu);
     free(fb);
+    free(bus);
     puts("VirtIO-GPU control and cursor queues, scanout, fencing, interrupts, bounds and reset passed");
     return 0;
 }
