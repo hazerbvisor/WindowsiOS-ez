@@ -107,6 +107,8 @@ typedef struct HvCpu {
 
     /* The rest is only touched by C. */
     struct HvMachine *m;
+    uint64_t excl_aperture_epoch;
+    int excl_aperture;
     uint32_t el;
 
     /* The exclusive monitor is excl_addr, excl_size and excl_val above: STXR is a

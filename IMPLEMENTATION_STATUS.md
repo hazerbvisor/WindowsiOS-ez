@@ -63,3 +63,5 @@ Added guest backing attach/detach, bounded typed buffer and 2D shadow texture al
 The manual unsigned IPA build accepts WINIOS_NEPTUNE_LAB=1 and stages the pinned native renderer, DXMT and ANGLE plus resolved physical-iOS dylib dependencies. It creates a separate lab artifact, never changes the baseline artifact, and activates only for an explicitly opted-in installed VM with one vCPU. The session driver installer offers the pinned signed ARM64X v0.6 3D package only after the backend reports initialized, with explicit backup acknowledgment. No Xcode or iPad runtime test has been performed; this is a build/test candidate, not a verified GPU-enabled release.
 
 Added saved per-VM guest-resolution presets for 11/13-inch iPads and common PC resolutions, advertised as the VirtIO-GPU custom mode via GET_DISPLAY_INFO with stable standard EDID timings. Host scaling and RAMFB remain independent. Guest mode acceptance and device display tests are pending.
+
+Experimental SMP lab candidate: removed 1-vCPU gate, protected GPU aperture lifetime and routed GPU queues/resets to CPU0. Device validation outstanding. No USB changes.

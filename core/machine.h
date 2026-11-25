@@ -199,7 +199,8 @@ typedef struct HvMachine {
 
     /* Optional CPU-only normal-memory device aperture. Never used by DMA,
        page walks or instruction fetch; never cached in JIT/TLB entries.
-       Only the CPU0 thread may resolve it, and only with one guest vCPU. */
+       Resolve/use only under dev_mu; no pointer may survive unlock. */
+    uint64_t cpu_aperture_epoch; /* atomic generation for exclusive accesses */
     void *cpu_aperture_opaque;
     void *(*cpu_aperture_ptr)(void *opaque, uint64_t pa, uint64_t bytes);
 

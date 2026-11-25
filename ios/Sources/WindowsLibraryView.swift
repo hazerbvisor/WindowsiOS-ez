@@ -653,7 +653,7 @@ private struct MachineEditor<Actions: View>: View {
                     NavigationLink("Display driver installation") { MetalGPUDriverView() }
                 }
             } header: { Text("Graphics") } footer: {
-                Text("RAMFB is the default. Ordinary builds offer display-only. A separate MetalGPU lab IPA requires one vCPU and a backed-up installed VM. Save before starting Windows. Shut down and relaunch the app with this off to recover. Setup always uses RAMFB.")
+                Text("RAMFB is the default. Ordinary builds offer display-only. The experimental MetalGPU SMP IPA accepts 1–8 vCPUs. Back up the installed VM; multi-vCPU GPU operation is unverified. Save before starting Windows. Shut down and relaunch the app with this off to recover. Setup always uses RAMFB.")
             }
             Section("Storage") {
                 if let disk {

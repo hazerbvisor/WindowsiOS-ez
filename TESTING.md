@@ -136,3 +136,6 @@ Run `cc -std=c11 -Wall -Wextra -Werror tests/test_gpu_modes.c -o /tmp/winios-gpu
 
 ### Precompiled MetalGPU CI variant
 The temporary build branch downloads official UTM artifact 14412813611 from run 44272292460 (pinned UTM commit 3d4b8d8), verifies its published archive SHA-256, physical iOS architecture and renderer symbols, and uses its native DXMT and virglrenderer directly. ANGLE and transitive dylibs are packaged as frameworks so libepoxy's dynamic library lookup works. No LLVM/ANGLE/DXMT/virglrenderer source builds occur in this mode. The normal WindowsiOS installer dependencies and app still compile. Artifact expiration or cross-repository access failure is an explicit build error, not a fallback to compiling the full graphics stack. Sign the app and embedded frameworks together. Device acceleration remains unverified.
+
+### Experimental SMP lab
+MetalGPU permits 1–8 vCPUs in the installed-VM opt-in. GPU command processing and deferred reset stay on CPU0. Aperture accesses hold the device lock; mapping changes and CPU aperture writes advance an exclusive epoch. Test 1, 2, 4 and 8 vCPUs on backed-up VMs, including reset, D3D11 rendering, concurrent aperture access and RAMFB recovery. Existing 2D regressions are not SMP/Metal validation. Physical-device results remain unverified.

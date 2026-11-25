@@ -218,6 +218,8 @@ static void ecam_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     }
     if (d->msix_cap && (old_msix ^ new_msix)) msix_check_pending(d);
     if (d->on_config_write) d->on_config_write(d);
+    if (p->m->cpu_aperture_ptr && reg < 0x28 && reg + size > 4)
+        __atomic_add_fetch(&p->m->cpu_aperture_epoch,1,__ATOMIC_RELEASE);
 }
 
 static HvPciDev *bar_lookup(HvPcie *p, uint64_t pa, int *bar, uint64_t *off) {

@@ -286,7 +286,7 @@ int hv_mem_decode(uint32_t insn, HvMemOp *op) {
 
 /* ---- C-side access ---- */
 
-int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, int el, uint64_t pc) {
+static int vmem_xfer_impl(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, int el, uint64_t pc, int *was_aperture) {
     uint8_t *b = buf;
     uint64_t w = cpu->m->watch_va;
     if (write && w && w - va < len) {
@@ -342,9 +342,14 @@ int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, in
                     : inpage + len > (1ull << HV_TLB_PAGE_BITS) - HV_TLB_ADJ ? 2 : had_entry == 0 ? 3 : had_entry == 2 ? 5 : 4;
             cpu->m->stats.slow_why[why]++;
         }
-        void *aperture = cpu->m->cpu_aperture_ptr ?
+        /* No GPU mapping can disappear while an access holds dev_mu. */
+        int locked = !hv_ram_lookup(cpu->m, pa);
+        if (locked) hv_dev_lock(cpu->m);
+        void *aperture = locked && cpu->m->cpu_aperture_ptr ?
             cpu->m->cpu_aperture_ptr(cpu->m->cpu_aperture_opaque, pa, chunk) : NULL;
+        if (!aperture && locked) hv_dev_unlock(cpu->m);
         if (aperture) {
+            if (was_aperture) *was_aperture = 1;
             /* Feedback rings share naturally aligned scalars with renderer threads.
                Preserve single-copy atomicity; ordered instructions fence in the caller. */
 #define APERTURE_SCALAR(T) do { T v; if (write) { memcpy(&v,b,sizeof(v)); __atomic_store_n((T *)aperture,v,__ATOMIC_RELAXED); } else { v=__atomic_load_n((T *)aperture,__ATOMIC_RELAXED); memcpy(b,&v,sizeof(v)); } } while (0)
@@ -355,6 +360,8 @@ int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, in
             else if (write) memcpy(aperture,b,chunk);
             else memcpy(b,aperture,chunk);
 #undef APERTURE_SCALAR
+            if (write) __atomic_add_fetch(&cpu->m->cpu_aperture_epoch,1,__ATOMIC_RELEASE);
+            hv_dev_unlock(cpu->m);
         } else if (hv_phys_ptr(cpu->m, pa, chunk)) {
             rc = write ? hv_phys_write(cpu->m, pa, b, chunk) : hv_phys_read(cpu->m, pa, b, chunk);
         } else {
@@ -375,6 +382,10 @@ int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, in
         len -= chunk;
     }
     return 0;
+}
+
+int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, int el, uint64_t pc) {
+    return vmem_xfer_impl(cpu, va, buf, len, write, el, pc, NULL);
 }
 
 static uint64_t gpr(HvCpu *cpu, int r) {
@@ -418,7 +429,8 @@ static int alignment_fault(HvCpu *cpu, uint64_t va, int write, uint64_t pc) {
 
 /* For atomics: a host pointer when va is RAM the guest may write, else NULL with
    *mmio_pa set. Returns -1 after an abort. */
-static int rmw_target(HvCpu *cpu, uint64_t va, uint32_t bytes, int el, uint64_t pc, void **host, uint64_t *mmio_pa) {
+static int rmw_target(HvCpu *cpu, uint64_t va, uint32_t bytes, int el, uint64_t pc, void **host, uint64_t *mmio_pa, int *aperture_locked) {
+    *aperture_locked = 0;
     if (!cpu->m->watch_va && !cpu->m->watch_pa && ((va & ((1u << HV_TLB_PAGE_BITS) - 1)) + bytes <= (1u << HV_TLB_PAGE_BITS))) {
         HvTlbEntry *t = hv_tlb_ent(cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), hv_tlb_table(cpu, el));
         uint64_t tag = __atomic_load_n(&t->write_tag, __ATOMIC_RELAXED);
@@ -434,14 +446,24 @@ static int rmw_target(HvCpu *cpu, uint64_t va, uint32_t bytes, int el, uint64_t 
         hv_raise_abort(cpu, 0, va, fsc, 1, fsc >= 0x14 && fsc <= 0x17, pc);
         return -1;
     }
-    void *aperture = cpu->m->cpu_aperture_ptr ?
-        cpu->m->cpu_aperture_ptr(cpu->m->cpu_aperture_opaque, pa, bytes) : NULL;
-    if (aperture && !((uintptr_t)aperture & (bytes-1))) {
-        *host = aperture;
-        *mmio_pa = pa;
-        return 0;
-    }
     HvRam *ram = hv_ram_lookup(cpu->m, pa);
+    if (!ram) {
+        hv_dev_lock(cpu->m);
+        void *aperture = cpu->m->cpu_aperture_ptr ?
+            cpu->m->cpu_aperture_ptr(cpu->m->cpu_aperture_opaque, pa, bytes) : NULL;
+        if (aperture) {
+            if ((uintptr_t)aperture & (bytes-1)) {
+                hv_dev_unlock(cpu->m);
+                hv_raise_abort(cpu,0,va,HV_FSC_EXTERNAL,1,0,pc);
+                return -1;
+            }
+            *host = aperture;
+            *mmio_pa = pa;
+            *aperture_locked = 1;
+            return 0;
+        }
+        hv_dev_unlock(cpu->m);
+    }
     if (ram && ram->readonly) { /* ROM: nothing to write; treat like a device */
         *host = NULL;
         *mmio_pa = pa;
@@ -494,13 +516,21 @@ static uint64_t atomic_result(int aop, int size, uint64_t old, uint64_t s) {
     }
 }
 
+static void finish_aperture_rmw(HvCpu *cpu, int locked) {
+    if (locked) {
+        __atomic_add_fetch(&cpu->m->cpu_aperture_epoch,1,__ATOMIC_RELEASE);
+        hv_dev_unlock(cpu->m);
+    }
+}
+
 static int do_atomic(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint64_t pc) {
     int size = op->size;
     uint32_t bytes = 1u << size;
     if (va & (bytes - 1)) return alignment_fault(cpu, va, 1, pc);
     void *host;
     uint64_t pa;
-    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa)) return 1;
+    int aperture_locked;
+    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa, &aperture_locked)) return 1;
     uint64_t mask = size == 3 ? ~0ull : (1ull << (8 << size)) - 1;
     uint64_t old, s = gpr(cpu, op->rs);
     if (op->kind == HV_MEM_CAS) {
@@ -514,6 +544,7 @@ static int do_atomic(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint64_
             if (old == (s & mask) && hv_phys_write(cpu->m, pa, &desired, bytes)) goto external;
         }
         set_gpr(cpu, op->rs, old);
+        finish_aperture_rmw(cpu,aperture_locked);
         return 0;
     }
     if (host) {
@@ -527,8 +558,10 @@ static int do_atomic(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint64_
         if (hv_phys_write(cpu->m, pa, &n, bytes)) goto external;
     }
     set_gpr(cpu, op->rt, old & mask);
+    finish_aperture_rmw(cpu,aperture_locked);
     return 0;
 external:
+    finish_aperture_rmw(cpu,aperture_locked);
     hv_raise_abort(cpu, 0, va, HV_FSC_EXTERNAL, 1, 0, pc);
     return 1;
 }
@@ -538,7 +571,8 @@ static int do_casp(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint64_t 
     if (va & (bytes - 1)) return alignment_fault(cpu, va, 1, pc);
     void *host;
     uint64_t pa;
-    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa)) return 1;
+    int aperture_locked;
+    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa, &aperture_locked)) return 1;
     uint64_t mask = esize == 8 ? ~0ull : 0xffffffffull;
     uint64_t c0 = gpr(cpu, op->rs) & mask, c1 = gpr(cpu, op->rs + 1) & mask;
     uint64_t n0 = gpr(cpu, op->rt) & mask, n1 = gpr(cpu, op->rt + 1) & mask;
@@ -565,8 +599,10 @@ static int do_casp(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint64_t 
     }
     set_gpr(cpu, op->rs, o0);
     set_gpr(cpu, op->rs + 1, o1);
+    finish_aperture_rmw(cpu,aperture_locked);
     return 0;
 external:
+    finish_aperture_rmw(cpu,aperture_locked);
     hv_raise_abort(cpu, 0, va, HV_FSC_EXTERNAL, 1, 0, pc);
     return 1;
 }
@@ -578,7 +614,9 @@ static int do_exclusive(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint
     uint32_t esize = pair ? 1u << op->size : bytes;
     if (op->load) {
         uint8_t buf[16];
-        if (hv_vmem_xfer(cpu, va, buf, bytes, 0, el, pc)) return 1;
+        cpu->excl_aperture = 0;
+        cpu->excl_aperture_epoch = __atomic_load_n(&cpu->m->cpu_aperture_epoch,__ATOMIC_ACQUIRE);
+        if (vmem_xfer_impl(cpu, va, buf, bytes, 0, el, pc, &cpu->excl_aperture)) return 1;
         cpu->excl_addr = va;
         cpu->excl_size = bytes;
         cpu->excl_val[0] = le(buf, esize);
@@ -589,11 +627,15 @@ static int do_exclusive(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint
     }
     void *host;
     uint64_t pa;
-    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa)) return 1;
+    int aperture_locked;
+    if (rmw_target(cpu, va, bytes, el, pc, &host, &pa, &aperture_locked)) return 1;
     uint64_t mask = esize == 8 ? ~0ull : (1ull << (esize * 8)) - 1;
     uint64_t n0 = gpr(cpu, op->rt) & mask, n1 = pair ? gpr(cpu, op->rt2) & mask : 0;
     int ok = 0;
-    if (cpu->excl_addr == va && cpu->excl_size == bytes) {
+    int aperture_match = (!cpu->excl_aperture && !aperture_locked) ||
+        (cpu->excl_aperture && aperture_locked &&
+         cpu->excl_aperture_epoch == __atomic_load_n(&cpu->m->cpu_aperture_epoch,__ATOMIC_ACQUIRE));
+    if (aperture_match && cpu->excl_addr == va && cpu->excl_size == bytes) {
         if (!host) {
             ok = !hv_phys_write(cpu->m, pa, &n0, esize) && (!pair || !hv_phys_write(cpu->m, pa + esize, &n1, esize));
         } else if (!pair) {
@@ -609,6 +651,9 @@ static int do_exclusive(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint
         }
     }
     cpu->excl_addr = ~0ull;
+    cpu->excl_aperture = 0;
+    if (aperture_locked && !ok) hv_dev_unlock(cpu->m);
+    else finish_aperture_rmw(cpu,aperture_locked);
     set_gpr(cpu, op->rs, ok ? 0 : 1);
     return 0;
 }

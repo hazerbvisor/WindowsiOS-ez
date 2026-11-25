@@ -1,29 +1,11 @@
-name: One-off MetalGPU lab IPA
+name: Experimental MetalGPU SMP IPA
 on:
   push:
-    branches: [build/metalgpu-cd413b7]
+    branches: [build/metalgpu-smp]
     paths: [.github/workflows/one-off-metalgpu.yml]
 permissions:
   contents: read
 jobs:
-  cancel-superseded:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Cancel only the superseded source build
-        run: |
-          set -euo pipefail
-          status="$(gh api repos/${{ github.repository }}/actions/runs/45616501786 --jq .status)"
-          if [ "$status" != completed ]; then
-            gh api --method POST repos/${{ github.repository }}/actions/runs/45616501786/cancel
-          else
-            echo "Old run is already completed."
-          fi
   lab-ipa:
     runs-on: xcode-27
     timeout-minutes: 45
@@ -48,12 +30,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci_precompiled_metalgpu.sh
+      - name: Check existing VirtIO GPU regressions
+        run: |
+          python3 -m unittest discover -s tests -p test_virtio_gpu.py
+          cc -std=c11 -Wall -Wextra -Werror tests/test_gpu_modes.c -o "$RUNNER_TEMP/gpu-modes"
+          "$RUNNER_TEMP/gpu-modes"
       - name: Compile WindowsiOS and package precompiled GPU frameworks
         run: bash scripts/build_unsigned_ipa.sh
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-precompiled-unsigned
+          name: WindowsiOS-ez-MetalGPU-SMP-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

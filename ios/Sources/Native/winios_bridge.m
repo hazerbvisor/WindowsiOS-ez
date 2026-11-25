@@ -561,8 +561,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     unsetenv("WINIOS_NEPTUNE_DXMT");
     unsetenv("WINIOS_NEPTUNE_EGL");
     // Only the separately built lab IPA has this manifest. The explicit
-    // VM graphics opt-in and one vCPU are still required.
-    if (experimentalGraphics && !installer && cpus == 1) {
+    // Opt-in SMP lab; normal 1–8 vCPU limits apply.
+    if (experimentalGraphics && !installer && cpus >= 1 && cpus <= 8) {
         NSURL *marker = [NSBundle.mainBundle URLForResource:@"MetalGPULab" withExtension:@"plist"];
         NSDictionary *libs = marker ? [NSDictionary dictionaryWithContentsOfURL:marker] : nil;
         NSString *folder = NSBundle.mainBundle.privateFrameworksPath;
