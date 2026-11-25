@@ -15,6 +15,7 @@
 #define DESC_F_NEXT 1
 #define DESC_F_WRITE 2
 #define DESC_F_INDIRECT 4
+#define DEVICE_NEEDS_RESET 64
 
 static void add_cap(HvVirtio *v, uint8_t at, uint8_t next, uint8_t type, uint32_t off, uint32_t len) {
     uint8_t *c = v->pci.config + at;
@@ -92,7 +93,10 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
     case 0x14:
         if ((uint8_t)val == 0) hv_virtio_reset(v);
         else {
-            v->status = (uint8_t)val;
+            uint8_t status = (uint8_t)val;
+            if (v->strict_dma)
+                status = (status & ~DEVICE_NEEDS_RESET) | (v->status & DEVICE_NEEDS_RESET);
+            v->status = status;
             if (v->strict_dma && (!(v->driver_features & HV_VIRTIO_F_VERSION_1) ||
                                   (v->driver_features & ~v->features))) v->status &= ~8u;
             if (v->strict_dma && !(v->status & 8)) v->status &= ~4u;
@@ -200,7 +204,7 @@ void *hv_virtio_dma_ptr(HvVirtio *v, uint64_t addr, uint64_t len) {
 }
 
 static void queue_needs_reset(HvVirtio *v) {
-    v->status |= 64; /* DEVICE_NEEDS_RESET */
+    v->status |= DEVICE_NEEDS_RESET;
     if (hv_pci_msix_enabled(&v->pci)) hv_pci_msix_notify(&v->pci, v->config_vector);
     else {
         v->isr |= 2;

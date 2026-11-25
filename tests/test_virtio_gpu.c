@@ -347,6 +347,8 @@ int main(void) {
     kick(0);
     assert(used_index(0) == before && read_bar(0x14, 1) == (15 | 64));
     assert(read_bar(0x1000, 1) == 2 && !intx);
+    write_bar(0x14, 15, 1);
+    assert(read_bar(0x14, 1) == (15 | 64));
 
     hv_virtio_gpu_destroy(gpu);
     for (int i = 0; i < HV_PCI_SLOTS; i++) assert(!bus.dev[i]);
