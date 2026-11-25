@@ -11,8 +11,7 @@ static id<MTLFunction> shader(id<MTLDevice> d,const char *path,MTLFunctionType s
     NSData *input=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
     NSError *error=nil;
     id<MTLFunction> f=wpvgCompileTrustedSM5(d,input,stage,&error);
-    if(!f) fprintf(stderr,"%s: %s\n",path,error.localizedDescription.UTF8String ?: "unknown error");
-    require(f!=nil,"DXBC conversion/Metal library loading");
+    if(!f) @throw [NSException exceptionWithName:@"WinPVGShaderFailure" reason:[NSString stringWithFormat:@"%s: %@",path,error.localizedDescription ?: @"DXBC conversion/Metal library loading failed"] userInfo:nil];
     return f;
 }
 static void render(id<MTLDevice> d,id<MTLCommandQueue> queue,
@@ -22,8 +21,7 @@ static void render(id<MTLDevice> d,id<MTLCommandQueue> queue,
     pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm;
     NSError *error=nil;
     id<MTLRenderPipelineState> pipeline=[d newRenderPipelineStateWithDescriptor:pd error:&error];
-    if(!pipeline) fprintf(stderr,"%s\n",error.localizedDescription.UTF8String ?: "pipeline error");
-    require(pipeline!=nil,"translated pipeline");
+    if(!pipeline) @throw [NSException exceptionWithName:@"WinPVGPipelineFailure" reason:error.localizedDescription ?: @"translated pipeline failed" userInfo:nil];
     MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
         MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
     td.storageMode=MTLStorageModePrivate; td.usage=MTLTextureUsageRenderTarget;
@@ -48,8 +46,7 @@ static void render(id<MTLDevice> d,id<MTLCommandQueue> queue,
         sourceSize:MTLSizeMake(64,64,1) toBuffer:b destinationOffset:0
         destinationBytesPerRow:256 destinationBytesPerImage:64*256];
     [blit endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if(cb.error) fprintf(stderr,"%s\n",cb.error.localizedDescription.UTF8String ?: "GPU error");
-    require(cb.status==MTLCommandBufferStatusCompleted,"GPU execution");
+    if(cb.status!=MTLCommandBufferStatusCompleted) @throw [NSException exceptionWithName:@"WinPVGGPUFailure" reason:cb.error.localizedDescription ?: @"GPU execution failed" userInfo:nil];
     const uint8_t *p=(const uint8_t *)b.contents;
     require(p!=nullptr,"readback");
     const uint8_t *center=p+32*256+32*4;
