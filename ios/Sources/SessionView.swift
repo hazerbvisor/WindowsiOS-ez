@@ -390,6 +390,14 @@ private struct SessionDetails: View {
                     }
                     LabeledContent("Frames presented", value: vm.presentedFrames.formatted())
                 }
+                if vm.experimentalGraphicsRequested && vm.installationSession == nil {
+                    Section("Experimental graphics") {
+                        NavigationLink("Install display driver") { MetalGPUDriverView() }
+                        Text("VirtIO-GPU requested; device and driver status must be verified in Windows. No 3D acceleration in this build.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section("Input") {
                     LabeledContent("Touch mode", value: relative ? "Relative trackpad" : "Direct")
                     LabeledContent("Guest USB keyboard", value: vm.usbKeyboardReady ? "Connected" : "Waiting")

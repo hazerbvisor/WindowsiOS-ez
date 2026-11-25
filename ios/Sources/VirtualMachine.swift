@@ -63,6 +63,8 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     var installationMethod: WindowsInstallationMethod?
     var lastOpened: Date?
     var displayScaling: String?
+    // Optional for backwards-compatible manifests; imported and new VMs default to RAMFB.
+    var experimentalGraphics: Bool?
     var windowsEdition: String?
     var lastGuestWidth: UInt32?
     var lastGuestHeight: UInt32?

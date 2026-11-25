@@ -155,6 +155,11 @@ enum VMFoundationTests {
             let legacyManifest = try PropertyListEncoder().encode(machine)
             let migrated = try PropertyListDecoder().decode(VirtualMachine.self, from: legacyManifest)
             precondition(migrated.displayScaling == nil && migrated.lastOpened == nil && migrated.hardware.jitOverrideMiB == nil)
+            precondition(migrated.experimentalGraphics == nil)
+            var graphicsOptIn = migrated
+            graphicsOptIn.experimentalGraphics = true
+            let graphicsRoundTrip = try PropertyListDecoder().decode(VirtualMachine.self, from: PropertyListEncoder().encode(graphicsOptIn))
+            precondition(graphicsRoundTrip.experimentalGraphics == true)
             var personalized = migrated
             personalized.displayScaling = "fill"
             personalized.hardware.jitOverrideMiB = 768

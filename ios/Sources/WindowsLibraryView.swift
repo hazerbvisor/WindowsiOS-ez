@@ -308,7 +308,8 @@ private struct MachineLibraryView: View {
         }
         vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
                 installer: installer, useTPM: machine?.usesTPM == true, method: machine?.installationMethod,
-                scaling: machine?.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? defaultScaling)
+                scaling: machine?.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? defaultScaling,
+                experimentalGraphics: machine?.installation == .preparedDisk && machine?.experimentalGraphics == true)
         showSession = true
     }
 
@@ -631,6 +632,16 @@ private struct MachineEditor<Actions: View>: View {
                 Text("Screen")
             } footer: {
                 Text("To change the guest resolution, open Session Details while Windows is running. The resolutions you can choose depend on the Windows display adapter. Host scaling applies when you open the session.")
+            }
+            Section {
+                Toggle("VirtIO-GPU (experimental)", isOn: Binding(get: { draft.experimentalGraphics == true },
+                    set: { draft.experimentalGraphics = $0 }))
+                    .disabled(!editable || draft.installation != .preparedDisk)
+                if draft.installation == .preparedDisk && draft.experimentalGraphics == true {
+                    NavigationLink("Display driver installation") { MetalGPUDriverView() }
+                }
+            } header: { Text("Graphics") } footer: {
+                Text("RAMFB is the default. This opt-in is display-only, not DirectX acceleration. Save before starting Windows. Shut down and relaunch the app with this off to recover. Setup always uses RAMFB.")
             }
             Section("Storage") {
                 if let disk {

@@ -47,7 +47,8 @@ typedef void (^WinIOSStateCallback)(void);
                              useTPM:(BOOL)useTPM
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
-                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:useTPM:ramMiB:jitMiB:cpus:));
+                              cpus:(int)cpus
+              experimentalGraphics:(BOOL)experimentalGraphics NS_SWIFT_NAME(start(directory:installer:useTPM:ramMiB:jitMiB:cpus:experimentalGraphics:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 - (void)setPresentationRate:(unsigned int)fps;
 
