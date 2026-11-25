@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "virtio_gpu.h"
+#include "virtio_gpu_modes.h"
 #ifdef WINIOS_ENABLE_NEPTUNE
 #include "neptune_wire.h"
 #endif
@@ -69,6 +70,7 @@ typedef struct NeptuneReply {
 struct HvVirtioGpu {
     HvVirtio vio;
     HvFbDisplay *fb;
+    uint32_t preferred_width, preferred_height;
     Resource resources[RESOURCES];
     Scanout screen;
     Cursor cursor;
@@ -314,20 +316,6 @@ static uint32_t flush(HvVirtioGpu *gpu, const Resource *res, const Rect *rect) {
     return OK_NODATA;
 }
 
-static void edid(uint8_t data[1024]) {
-    static const uint8_t header[] = {0,255,255,255,255,255,255,0,0x5c,0x53,1,0,0,0,0,0,1,34,1,4,0x80,27,20,120,0x0a};
-    static const uint8_t dtd[] = {0x64,0x19,0,0x40,0x41,0,0x26,0x30,0x18,0x88,0x36,0,0x0e,0xcb,0,0,0,0x18};
-    memcpy(data, header, sizeof(header));
-    data[35] = 0x21; /* established 640x480 and 800x600 at 60 Hz */
-    data[36] = 0x08; /* established 1024x768 at 60 Hz */
-    memset(data + 38, 1, 16);
-    memcpy(data + 54, dtd, sizeof(dtd));
-    data[75] = 0xfc;
-    memcpy(data + 77, "WindowsiOS\n  ", 13);
-    for (unsigned pos = 90; pos <= 108; pos += 18) data[pos + 3] = 0x10;
-    for (unsigned i = 0; i < 127; i++) data[127] -= data[i];
-}
-
 static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
     struct { Header hdr; uint8_t body[32]; } req = {0};
     union { Header hdr; DisplayInfo display; EdidReply edid; } reply = {0};
@@ -352,7 +340,7 @@ static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
     case GET_DISPLAY_INFO:
         if (writable < sizeof(DisplayInfo)) break;
         reply.display.modes[0].enabled = 1;
-        reply.display.modes[0].rect = (Rect){0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT};
+        reply.display.modes[0].rect = (Rect){0, 0, gpu->preferred_width, gpu->preferred_height};
         reply.hdr.type = OK_DISPLAY_INFO;
         bytes = sizeof(DisplayInfo);
         break;
@@ -361,7 +349,7 @@ static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
         if (body[0]) { reply.hdr.type = ERR_SCANOUT; break; }
         reply.hdr.type = OK_EDID;
         reply.edid.size = 128;
-        edid(reply.edid.data);
+        hv_gpu_mode_edid(reply.edid.data);
         bytes = sizeof(EdidReply);
         break;
     case RESOURCE_CREATE_2D:
@@ -746,6 +734,7 @@ HvVirtioGpu *hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb) {
     vio->notify = notify;
     vio->reset_device = reset_device;
     gpu->fb = fb;
+    hv_gpu_preferred_mode(getenv("WINIOS_GPU_RESOLUTION"),&gpu->preferred_width,&gpu->preferred_height);
     if (hv_pcie_attach(bus, &vio->pci) < 0) {
         free(gpu);
         return NULL;

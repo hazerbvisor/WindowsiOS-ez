@@ -58,6 +58,7 @@ final class VMViewModel: ObservableObject {
     private var bootInstaller: URL?
     private var bootUsesTPM = false
     private(set) var experimentalGraphicsRequested = false
+    private var bootGuestResolution: GuestResolution = .compatibility
     private var bootHardware: VMHardware?
     private(set) var initialScaling: GuestDisplayGeometry.Scaling = .fit
 
@@ -142,11 +143,12 @@ final class VMViewModel: ObservableObject {
 
     func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false,
               method: WindowsInstallationMethod? = nil, scaling: GuestDisplayGeometry.Scaling = .fit,
-              experimentalGraphics: Bool = false) {
+              experimentalGraphics: Bool = false, guestResolution: GuestResolution = .compatibility) {
         initialScaling = scaling
         bootDirectory = directory
         bootInstaller = installer
         experimentalGraphicsRequested = experimentalGraphics && directory != nil && installer == nil
+        bootGuestResolution = experimentalGraphicsRequested ? guestResolution : .compatibility
         bootUsesTPM = useTPM || installer != nil
         installationSession = installer == nil ? nil : (method ?? .graphical)
         bootHardware = hardware
@@ -156,7 +158,8 @@ final class VMViewModel: ObservableObject {
     func startOrRetry() {
         guard let bootHardware else { return }
         WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, useTPM: bootUsesTPM, ramMiB: UInt64(bootHardware.ramMiB),
-                                  jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs), experimentalGraphics: experimentalGraphicsRequested)
+                                  jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs), experimentalGraphics: experimentalGraphicsRequested,
+                                  guestWidth: bootGuestResolution.dimensions.width, guestHeight: bootGuestResolution.dimensions.height)
         syncFromBridge()
     }
 

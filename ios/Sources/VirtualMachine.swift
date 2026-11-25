@@ -50,6 +50,46 @@ enum WindowsInstallationMethod: String, Codable, CaseIterable {
     }
 }
 
+enum GuestResolution: String, CaseIterable, Codable, Identifiable {
+    case compatibility, ipad11Performance, ipad11Balanced, ipad11Retina
+    case ipad13Performance, ipad13Balanced, ipad13Retina
+    case hd, fullHD, wuxga, qhd
+
+    var id: Self { self }
+    var dimensions: (width: UInt32, height: UInt32) {
+        switch self {
+        case .compatibility: (1024, 768)
+        case .ipad11Performance: (1180, 820)
+        case .ipad11Balanced: (1770, 1230)
+        case .ipad11Retina: (2360, 1640)
+        case .ipad13Performance: (1366, 1024)
+        case .ipad13Balanced: (2048, 1536)
+        case .ipad13Retina: (2732, 2048)
+        case .hd: (1280, 720)
+        case .fullHD: (1920, 1080)
+        case .wuxga: (1920, 1200)
+        case .qhd: (2560, 1440)
+        }
+    }
+    var title: String {
+        let name: String
+        switch self {
+        case .compatibility: name = "Compatibility"
+        case .ipad11Performance: name = "11-inch · Performance"
+        case .ipad11Balanced: name = "11-inch · Balanced"
+        case .ipad11Retina: name = "11-inch · Retina"
+        case .ipad13Performance: name = "13-inch · Performance"
+        case .ipad13Balanced: name = "13-inch · Balanced"
+        case .ipad13Retina: name = "13-inch · Retina"
+        case .hd: name = "HD"
+        case .fullHD: name = "Full HD"
+        case .wuxga: name = "WUXGA"
+        case .qhd: name = "QHD"
+        }
+        return "\(name) — \(dimensions.width) × \(dimensions.height)"
+    }
+}
+
 struct VirtualMachine: Codable, Identifiable, Equatable {
     enum Installation: String, Codable {
         case preparedDisk, blankDisk
@@ -65,6 +105,7 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     var displayScaling: String?
     // Optional for backwards-compatible manifests; imported and new VMs default to RAMFB.
     var experimentalGraphics: Bool?
+    var guestResolution: GuestResolution?
     var windowsEdition: String?
     var lastGuestWidth: UInt32?
     var lastGuestHeight: UInt32?

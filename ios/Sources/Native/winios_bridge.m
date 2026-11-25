@@ -377,7 +377,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                             ramMiB:(uint64_t)ramMiB
                             jitMiB:(uint64_t)jitMiB
                               cpus:(int)cpus
-              experimentalGraphics:(BOOL)experimentalGraphics {
+              experimentalGraphics:(BOOL)experimentalGraphics
+                         guestWidth:(uint32_t)guestWidth
+                        guestHeight:(uint32_t)guestHeight {
     if (_vmRunning || _unpacking) return;
     if (_engineUsed) {
         [self reportStartFailure:@"Close and reopen WindowsiOS-ez before starting another session."];
@@ -422,7 +424,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                 self->_unpacking = NO;
                 if (rc == 0) {
                     self->_unpackProgress = 1.0;
-                    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus experimentalGraphics:experimentalGraphics];
+                    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus experimentalGraphics:experimentalGraphics guestWidth:guestWidth guestHeight:guestHeight];
                 } else {
                     self->_vmStatus = @"Could not import the sparse disk. Check the archive, free space and whether windows11.img already exists.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -433,10 +435,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus experimentalGraphics:experimentalGraphics];
+    [self startConfiguredVMInDirectory:dir installer:installer useTPM:useTPM ramMiB:ramMiB jitMiB:jitMiB cpus:cpus experimentalGraphics:experimentalGraphics guestWidth:guestWidth guestHeight:guestHeight];
 }
 
-- (void)startConfiguredVMInDirectory:(NSString *)dir installer:(nullable NSString *)installer useTPM:(BOOL)useTPM ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus experimentalGraphics:(BOOL)experimentalGraphics {
+- (void)startConfiguredVMInDirectory:(NSString *)dir installer:(nullable NSString *)installer useTPM:(BOOL)useTPM ramMiB:(uint64_t)ramMiB jitMiB:(uint64_t)jitMiB cpus:(int)cpus experimentalGraphics:(BOOL)experimentalGraphics guestWidth:(uint32_t)guestWidth guestHeight:(uint32_t)guestHeight {
     if (_vmRunning || _engineUsed) return;
 
     WinIosDualMapping jit = winios_jit_mapping();
@@ -547,8 +549,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _engineUsed = YES;
     // The board reads this opt-in synchronously during creation. Never enable it for Setup.
     // Set it explicitly for each launch, so a previous preference cannot affect another VM.
-    if (experimentalGraphics && !installer) setenv("WINIOS_VIRTIO_GPU", "1", 1);
-    else unsetenv("WINIOS_VIRTIO_GPU");
+    unsetenv("WINIOS_GPU_RESOLUTION");
+    if (experimentalGraphics && !installer) {
+        setenv("WINIOS_VIRTIO_GPU", "1", 1);
+        char mode[32];
+        snprintf(mode,sizeof mode,"%ux%u",guestWidth,guestHeight);
+        setenv("WINIOS_GPU_RESOLUTION",mode,1);
+    } else unsetenv("WINIOS_VIRTIO_GPU");
     unsetenv("WINIOS_NEPTUNE_LAB");
     unsetenv("WINIOS_NEPTUNE_RENDERER");
     unsetenv("WINIOS_NEPTUNE_DXMT");
@@ -574,6 +581,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
     int createResult = hv_winvm_create(&cfg, err, sizeof err);
     unsetenv("WINIOS_VIRTIO_GPU");
+    unsetenv("WINIOS_GPU_RESOLUTION");
     if (createResult != 0) {
         _vmStatus = [NSString stringWithFormat:@"VM create failed: %s Close and reopen the app before retrying. If RAM allocation failed, choose Automatic in the machine settings.", err];
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });

@@ -309,7 +309,8 @@ private struct MachineLibraryView: View {
         vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
                 installer: installer, useTPM: machine?.usesTPM == true, method: machine?.installationMethod,
                 scaling: machine?.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? defaultScaling,
-                experimentalGraphics: machine?.installation == .preparedDisk && machine?.experimentalGraphics == true)
+                experimentalGraphics: machine?.installation == .preparedDisk && machine?.experimentalGraphics == true,
+                guestResolution: machine?.guestResolution ?? .compatibility)
         showSession = true
     }
 
@@ -625,6 +626,17 @@ private struct MachineEditor<Actions: View>: View {
                 }
                 .pickerStyle(.segmented)
                 .disabled(!editable)
+                if draft.experimentalGraphics == true && draft.installation == .preparedDisk {
+                    Picker("Guest resolution", selection: Binding(get: {
+                        draft.guestResolution ?? .compatibility
+                    }, set: { draft.guestResolution = $0 })) {
+                        ForEach(GuestResolution.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }.disabled(!editable)
+                    Text("Advertises the selected mode to the Windows VirtIO display driver on next launch. Choose that resolution in Windows Display settings if it does not switch automatically.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 if let width = draft.lastGuestWidth, let height = draft.lastGuestHeight {
                     LabeledContent("Last guest resolution", value: "\(width) × \(height)")
                 }
