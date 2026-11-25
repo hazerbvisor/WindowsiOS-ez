@@ -48,76 +48,97 @@ private struct MachineLibraryView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if sessionBusy {
-                    Button { showSession = true } label: {
-                        Label(activeMachine?.name ?? "Windows 11", systemImage: "play.rectangle")
-                    }
-                    .accessibilityHint("Return to the active virtual machine")
+            machineConfirmations
+                .alert("Local Backup Saved", isPresented: Binding(
+                    get: { localBackup != nil }, set: { if !$0 { localBackup = nil } }
+                )) {
+                    Button("OK", role: .cancel) { localBackup = nil }
+                } message: {
+                    Text(localBackup ?? "")
                 }
-                if !sessionBusy, let activeMachine, !vm.needsRelaunchToStart {
-                    Section {
-                        Text(vm.vmStatusText).foregroundStyle(.secondary)
-                    } header: {
-                        Text(activeMachine.name)
-                    }
+                .alert("Virtual Machine Files", isPresented: errorPresented) {
+                    Button("OK", role: .cancel) { error = nil }
+                } message: {
+                    Text(error ?? "")
                 }
-                if vm.needsRelaunchToStart {
-                    Section {
-                        Label("Reopen the app to start a new session.", systemImage: "arrow.clockwise")
-                    }
+        }
+    }
+
+    private var machineList: some View {
+        List {
+            if sessionBusy {
+                Button { showSession = true } label: {
+                    Label(activeMachine?.name ?? "Windows 11", systemImage: "play.rectangle")
                 }
-                if busy {
-                    if let importProgress { ImportProgressView(progress: importProgress) }
-                    else { ProgressView("Working with machine files…") }
-                }
-                if machines.isEmpty && !hasLegacy && !busy && !sessionBusy {
-                    ContentUnavailableView {
-                        Label("No virtual machines", systemImage: "desktopcomputer")
-                    } description: {
-                        Text("Prepare a new virtual disk or import a folder with a prepared Windows machine.")
-                    } actions: {
-                        Button("Create Virtual Machine") { showAssistant = true }
-                            .buttonStyle(.borderedProminent)
-                    }
-                }
-                ForEach(machines) { machine in
-                    machineRow(machine)
-                }
-                ImportInboxSection(kinds: [.machine, .disk], disabled: busy || sessionBusy) { entry in
-                    importMachine(kind: entry.kind, selection: ImportSelection(entry.url))
-                }
-                if hasLegacy {
-                    Section {
-                        Button { start(nil) } label: {
-                            Label("Windows 11", systemImage: "desktopcomputer")
-                        }
-                        .disabled(sessionBusy || busy || vm.needsRelaunchToStart)
-                    } header: {
-                        Text("Existing installation")
-                    } footer: {
-                        Text("Uses your prepared disk and firmware in Files.")
-                    }
+                .accessibilityHint("Return to the active virtual machine")
+            }
+            if !sessionBusy, let activeMachine, !vm.needsRelaunchToStart {
+                Section {
+                    Text(vm.vmStatusText).foregroundStyle(.secondary)
+                } header: {
+                    Text(activeMachine.name)
                 }
             }
-            .navigationTitle("Virtual Machines")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button("Create Virtual Machine", systemImage: "plus") { showAssistant = true }
-                        Button("Import Folder", systemImage: "folder") { pickerRequest = DocumentPickerRequest(kind: .machine) }
-                        Button("Import Disk Image", systemImage: "externaldrive") { pickerRequest = DocumentPickerRequest(kind: .disk) }
-                    } label: {
-                        Label("Add Virtual Machine", systemImage: "plus")
-                    }
-                    .disabled(busy || sessionBusy)
+            if vm.needsRelaunchToStart {
+                Section {
+                    Label("Reopen the app to start a new session.", systemImage: "arrow.clockwise")
                 }
             }
-            .refreshable { refresh() }
-            .onAppear { refresh() }
-            .onChange(of: scenePhase) { _, newPhase in
-                if newPhase == .active { refresh() }
+            if busy {
+                if let importProgress { ImportProgressView(progress: importProgress) }
+                else { ProgressView("Working with machine files…") }
             }
+            if machines.isEmpty && !hasLegacy && !busy && !sessionBusy {
+                ContentUnavailableView {
+                    Label("No virtual machines", systemImage: "desktopcomputer")
+                } description: {
+                    Text("Prepare a new virtual disk or import a folder with a prepared Windows machine.")
+                } actions: {
+                    Button("Create Virtual Machine") { showAssistant = true }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            ForEach(machines) { machine in
+                machineRow(machine)
+            }
+            ImportInboxSection(kinds: [.machine, .disk], disabled: busy || sessionBusy) { entry in
+                importMachine(kind: entry.kind, selection: ImportSelection(entry.url))
+            }
+            if hasLegacy {
+                Section {
+                    Button { start(nil) } label: {
+                        Label("Windows 11", systemImage: "desktopcomputer")
+                    }
+                    .disabled(sessionBusy || busy || vm.needsRelaunchToStart)
+                } header: {
+                    Text("Existing installation")
+                } footer: {
+                    Text("Uses your prepared disk and firmware in Files.")
+                }
+            }
+        }
+        .navigationTitle("Virtual Machines")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Create Virtual Machine", systemImage: "plus") { showAssistant = true }
+                    Button("Import Folder", systemImage: "folder") { pickerRequest = DocumentPickerRequest(kind: .machine) }
+                    Button("Import Disk Image", systemImage: "externaldrive") { pickerRequest = DocumentPickerRequest(kind: .disk) }
+                } label: {
+                    Label("Add Virtual Machine", systemImage: "plus")
+                }
+                .disabled(busy || sessionBusy)
+            }
+        }
+        .refreshable { refresh() }
+        .onAppear { refresh() }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { refresh() }
+        }
+    }
+
+    private var machinePresentations: some View {
+        machineList
             .documentPicker($pickerRequest, exported: { _ in cleanExports() }, selected: importMachine)
             .sheet(item: $editor) { machine in
                 MachineEditor(machine: machine, directory: repo.directory(for: machine)) { edited in
@@ -128,23 +149,11 @@ private struct MachineLibraryView: View {
             .sheet(isPresented: $showAssistant, onDismiss: closeAssistant) {
                 InstallationAssistant(vm: vm) { setupAfterAssistant = $0 }
             }
-            .sheet(item: $export, onDismiss: cleanExports) { item in
-                FolderExporter(url: item.folder)
-            }
-            .fullScreenCover(isPresented: $showSession) {
-                SessionView(vm: vm)
-                    .preferredColorScheme(.dark)
-                    .overlay(alignment: .topLeading) {
-                        Button {
-                            showSession = false
-                        } label: {
-                            Label("Library", systemImage: "chevron.backward")
-                                .padding(6)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .padding()
-                    }
-            }
+            .fullScreenCover(isPresented: $showSession) { machineSession }
+    }
+
+    private var machineConfirmations: some View {
+        machinePresentations
             .confirmationDialog("Delete virtual machine?", isPresented: deletionPresented, presenting: deleteCandidate) { machine in
                 Button("Delete \(machine.name)", role: .destructive) {
                     deleteCandidate = nil
@@ -166,19 +175,21 @@ private struct MachineLibraryView: View {
             } message: { _ in
                 Text("Continue after Windows Setup has finished and the guest has shut down. The primary disk is checked for ARM64 Windows boot files before switching.")
             }
-            .alert("Local Backup Saved", isPresented: Binding(
-                get: { localBackup != nil }, set: { if !$0 { localBackup = nil } }
-            )) {
-                Button("OK", role: .cancel) { localBackup = nil }
-            } message: {
-                Text(localBackup ?? "")
+    }
+
+    private var machineSession: some View {
+        SessionView(vm: vm)
+            .preferredColorScheme(.dark)
+            .overlay(alignment: .topLeading) {
+                Button {
+                    showSession = false
+                } label: {
+                    Label("Library", systemImage: "chevron.backward")
+                        .padding(6)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
             }
-            .alert("Virtual Machine Files", isPresented: errorPresented) {
-                Button("OK", role: .cancel) { error = nil }
-            } message: {
-                Text(error ?? "")
-            }
-        }
     }
 
     private var sessionBusy: Bool { vm.isVMRunning || vm.isUnpacking }

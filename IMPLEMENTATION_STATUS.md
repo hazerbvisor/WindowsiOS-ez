@@ -12,4 +12,6 @@ Twenty-five Linux tests passed, covering nine Swift foundation groups, a 2.25 Gi
 
 The first reported Codemagic build stopped during OpenSSL compilation because the generated headers were missing. The dependency script now generates them before building the crypto archive. The next reported Xcode 27.2 run built the native dependencies and stopped compiling the ISO reader and SHA-256 helper because Darwin hides `O_NOFOLLOW` in strict POSIX mode. Both files now request Darwin interfaces on Apple targets and keep symlink rejection. An ARM64 iOS preprocessor probe checked Apple's public header condition, and Linux regression tests checked that hashing and installer preparation reject ISO symlinks. A complete Xcode build and an iPadOS 27.0.1 picker and Setup pass remain pending.
 
+The subsequent Codemagic retry compiled the native sources and bridging header, then stopped in `WindowsLibraryView`. The old export sheet referenced Swift symbols removed during the UIKit picker migration. Exports now use the shared picker presentation, and the machine list, presentations and confirmation dialogs are separate SwiftUI expressions. Linux Swift syntax validation cannot verify the iPhoneOS SwiftUI type check.
+
 See [BUILDING.md](BUILDING.md), [TESTING.md](TESTING.md), [COMPATIBILITY.md](COMPATIBILITY.md) and [ROADMAP.md](ROADMAP.md).
