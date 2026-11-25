@@ -31,7 +31,6 @@ struct WindowsiOSApp: App {
                     if newPhase == .active {
                         viewModel.onAppBecameActive()
                     } else if newPhase == .background {
-                        viewModel.cancelClipboardTyping()
                         WinIOSBridge.shared.flushDisks()
                     }
                 }

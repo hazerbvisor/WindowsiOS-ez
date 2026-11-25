@@ -17,3 +17,9 @@
 5. Test the experimental Graphical Setup method and its optional edition-only answer file separately. Confirm primary EFI checks, installer cleanup and the intact source ISO for both methods.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the locally verified portions.
+
+## Windows interface and input
+
+1. Validate the Machines, Install and Settings redesign and open an existing VM without reinstalling. Verify GameController mouse buttons, trackpad dragging, host cursor visibility, keyboard handling and portrait/landscape input on the target iPad.
+2. Validate framebuffer presentation, storage accounting and the session details against device measurements. The bundled GOP exposes 640×480, 800×600 and 1024×768. Configurable guest modes beyond that require compatible firmware or a Windows display driver and separate boot validation.
+3. Add authenticated Windows guest integration before offering automatic clipboard synchronization. Evaluate safe offline disk compaction and TRIM, then separate external display routing. Snapshots, instant resume, persistent JIT caching and GPU virtualization remain separate projects.

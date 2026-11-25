@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include <os/lock.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static WinIOSBridge *s_shared_bridge = nil;
 static const uint64_t kMinimumDiskBytes = 64ull << 20;
@@ -817,6 +818,20 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         [self notifyChanged];
     });
 }
+
+- (void)saveDesktopPreviewTo:(NSURL *)destination {
+    dispatch_async(_diagQueue, ^{
+        NSURL *temporary = [destination URLByAppendingPathExtension:@"tmp"];
+        if (hv_winvm_save_png(temporary.fileSystemRepresentation) == 0)
+            rename(temporary.fileSystemRepresentation, destination.fileSystemRepresentation);
+        else
+            unlink(temporary.fileSystemRepresentation);
+    });
+}
+
+- (NSUInteger)mappedJITMiB { return winios_jit_mapping().size >> 20; }
+- (BOOL)guestShareAvailable { return _vmRunning && hv_winvm_share_up(); }
+- (void)setPresentationRate:(unsigned int)fps { hv_winvm_set_presentation_rate(fps); }
 
 - (void)stopVM {
     if (!_vmRunning) return;

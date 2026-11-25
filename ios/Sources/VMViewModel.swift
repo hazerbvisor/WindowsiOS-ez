@@ -22,42 +22,6 @@ struct SafariSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
 
-enum PostureMode: String, CaseIterable {
-    case auto = "Auto"
-    case laptop = "Laptop"
-    case fullScreen = "Studio"
-
-    var iconName: String {
-        switch self {
-        case .auto: return "sparkles"
-        case .laptop: return "laptopcomputer"
-        case .fullScreen: return "ipad.landscape"
-        }
-    }
-}
-
-enum DeckLayout: String, CaseIterable {
-    case split = "Split"
-    case trackpad = "Trackpad"
-    case keyboard = "Keyboard"
-
-    var iconName: String {
-        switch self {
-        case .split: return "laptopcomputer"
-        case .trackpad: return "rectangle.and.hand.point.up.left"
-        case .keyboard: return "keyboard"
-        }
-    }
-
-    var next: DeckLayout {
-        switch self {
-        case .split: return .trackpad
-        case .trackpad: return .keyboard
-        case .keyboard: return .split
-        }
-    }
-}
-
 @MainActor
 final class VMViewModel: ObservableObject {
     @Published var isJITLive: Bool = false
@@ -86,16 +50,6 @@ final class VMViewModel: ObservableObject {
     @Published var usbTabletReady: Bool = false
     @Published var usbEventsDelivered: UInt64 = 0
 
-    // iOS 27.1 UIHinge state (0 = unknown, 1 = closed, 2 = partiallyOpen, 3 = fullyOpen)
-    @Published var hingeStatusRaw: Int = 0
-    @Published var hingeAngleDegrees: Double? = nil
-
-    @Published var postureMode: PostureMode = .auto
-    @Published var deckLayout: DeckLayout = .split
-    @Published var controlBarVisible: Bool = true
-    @Published var trackpadMode: Bool = false
-    @Published var rightClickArmed: Bool = false
-    @Published var systemKeyboardVisible: Bool = false
     @Published var activeSafariURL: IdentifiableURL? = nil
     @Published var clipboardError: String?
     @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
@@ -104,8 +58,17 @@ final class VMViewModel: ObservableObject {
     private var bootInstaller: URL?
     private var bootUsesTPM = false
     private var bootHardware: VMHardware?
+    private(set) var initialScaling: GuestDisplayGeometry.Scaling = .fit
+
+    var hardwareSummary: String {
+        guard let bootHardware else { return "Unavailable" }
+        return bootHardware.ramMiB == 0 ? "Automatic" : "\(bootHardware.ramMiB) MiB"
+    }
+
+    var requestedJITSummary: String {
+        bootHardware.map { "\($0.jitMiB) MiB requested" } ?? "Unavailable"
+    }
     private var oauthPollTimer: Timer? = nil
-    private var clipboardTask: Task<Void, Never>?
 
     init() {
         let bridge = WinIOSBridge.shared
@@ -148,93 +111,6 @@ final class VMViewModel: ObservableObject {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
-    func isLaptopLayoutActive(for size: CGSize) -> Bool {
-        switch postureMode {
-        case .laptop:
-            return true
-        case .fullScreen:
-            return false
-        case .auto:
-            // Hardware hinge folded into laptop posture (partiallyOpen == 2, or live hinge angle 30°..166°)
-            if hingeStatusRaw == 2 {
-                return true
-            }
-            if let deg = hingeAngleDegrees {
-                return deg >= 30.0 && deg <= 166.0
-            }
-            // Fallback when UIHinge hasn't reported yet: portrait inner screen defaults to Laptop
-            let isUnfoldedInner = max(size.width, size.height) > 780 && min(size.width, size.height) > 580
-            if hingeStatusRaw == 0 && isUnfoldedInner && size.height > size.width {
-                return true
-            }
-            return false
-        }
-    }
-
-    func updateHinge(statusRaw: Int, angleDegrees: Double?, viewportSize: CGSize) {
-        let wasPartiallyOpen = (hingeStatusRaw == 2)
-        hingeStatusRaw = statusRaw
-        hingeAngleDegrees = angleDegrees
-        if postureMode == .auto && statusRaw == 2 && !wasPartiallyOpen {
-            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
-        }
-    }
-
-    func cyclePostureMode(viewportSize: CGSize) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        switch postureMode {
-        case .auto:
-            postureMode = .laptop
-            SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
-        case .laptop:
-            postureMode = .fullScreen
-        case .fullScreen:
-            postureMode = .auto
-        }
-    }
-
-    func launchGuestEdgeBrowser() {
-        // Win+R -> "msedge" -> Enter
-        WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x15)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-            let msedgeHids: [UInt8] = [0x10, 0x16, 0x08, 0x07, 0x0a, 0x08, 0x28] // m s e d g e Enter
-            for (idx, code) in msedgeHids.enumerated() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.045) {
-                    WinIOSBridge.shared.tapKeyHid(code)
-                }
-            }
-        }
-    }
-
-    func launchGuestAntigravity() {
-        // Win+R -> "antigravity" -> Enter (registered in HKCU\...\App Paths\antigravity.exe)
-        WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x15)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-            // a n t i g r a v i t y Enter
-            let agHids: [UInt8] = [0x04, 0x11, 0x17, 0x0c, 0x0a, 0x15, 0x04, 0x19, 0x0c, 0x17, 0x1c, 0x28]
-            for (idx, code) in agHids.enumerated() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.040) {
-                    WinIOSBridge.shared.tapKeyHid(code)
-                }
-            }
-        }
-    }
-
-    func launchGuestPaint() {
-        // Win+R -> "mspaint" -> Enter
-        WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x15)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-            // m s p a i n t Enter
-            let paintHids: [UInt8] = [0x10, 0x16, 0x13, 0x04, 0x0c, 0x11, 0x17, 0x28]
-            for (idx, code) in paintHids.enumerated() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.042) {
-                    WinIOSBridge.shared.tapKeyHid(code)
-                }
-            }
-        }
-    }
-
     func syncFromBridge() {
         let b = WinIOSBridge.shared
         isJITLive = b.isJITLive
@@ -264,7 +140,8 @@ final class VMViewModel: ObservableObject {
     }
 
     func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false,
-              method: WindowsInstallationMethod? = nil) {
+              method: WindowsInstallationMethod? = nil, scaling: GuestDisplayGeometry.Scaling = .fit) {
+        initialScaling = scaling
         bootDirectory = directory
         bootInstaller = installer
         bootUsesTPM = useTPM || installer != nil
@@ -280,35 +157,9 @@ final class VMViewModel: ObservableObject {
         syncFromBridge()
     }
 
-    func typeClipboardText(_ text: String) {
-        guard isVMRunning, usbKeyboardReady, clipboardTask == nil else { return }
-        guard text.utf8.count <= 1024, text.utf8.allSatisfy({ (32...126).contains($0) }) else {
-            clipboardError = "Choose a single line of up to 1024 printable ASCII characters. The guest uses its active keyboard layout."
-            return
-        }
-        let keys = text.compactMap(MetalCanvasUIView.asciiToHID)
-        guard keys.count == text.count else {
-            clipboardError = "Some clipboard characters do not have a USB keyboard mapping."
-            return
-        }
-
-        clipboardTask = Task { @MainActor [weak self] in
-            defer { self?.clipboardTask = nil }
-            let bridge = WinIOSBridge.shared
-            for (key, shift) in keys {
-                guard !Task.isCancelled, bridge.isVMRunning else { break }
-                if shift { bridge.sendKeyHid(0xe1, down: true) }
-                bridge.sendKeyHid(key, down: true)
-                try? await Task.sleep(for: .milliseconds(25))
-                bridge.sendKeyHid(key, down: false)
-                if shift { bridge.sendKeyHid(0xe1, down: false) }
-                try? await Task.sleep(for: .milliseconds(25))
-            }
-        }
-    }
-
-    func cancelClipboardTyping() {
-        clipboardTask?.cancel()
+    func saveDesktopPreview() {
+        guard let bootDirectory else { return }
+        WinIOSBridge.shared.saveDesktopPreview(to: bootDirectory.appendingPathComponent(VMRepository.preview))
     }
 
     func requestStikDebugJIT() {

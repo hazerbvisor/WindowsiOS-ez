@@ -11,6 +11,7 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     SWIFT_VERSION: "5.0"
+    WINIOS_BUILD_COMMIT: "Unavailable"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 targets:
@@ -35,6 +36,8 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        UIApplicationSupportsIndirectInputEvents: true
+        WINIOSBuildCommit: "$(WINIOS_BUILD_COMMIT)"
         UIStatusBarHidden: false
         UIViewControllerBasedStatusBarAppearance: true
         NSMicrophoneUsageDescription: "Windows 11 and Antigravity use your device microphone for live voice input and audio capture."
@@ -97,3 +100,4 @@ targets:
       - sdk: CoreGraphics.framework
       - sdk: ImageIO.framework
       - sdk: UniformTypeIdentifiers.framework
+      - sdk: GameController.framework

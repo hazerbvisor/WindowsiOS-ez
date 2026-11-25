@@ -4,286 +4,220 @@ import QuartzCore
 import SwiftUI
 import UIKit
 
-final class MetalCanvasUIView: UIView, UIKeyInput {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
-
-    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
-    var trackpadMode: Bool = false
-    var rightClickArmed: Bool = false
-    var onRightClickConsumed: (() -> Void)?
-    var onThreeFingerTap: (() -> Void)?
-
-    private var activeDragButtons: UInt8 = 0
-    private var panLastPoint: CGPoint = .zero
-    private var scrollAccum: CGFloat = 0
-    private let tapHaptic = UIImpactFeedbackGenerator(style: .light)
+/// A guest input surface. Its touch recognizers only accept direct touches.
+@MainActor
+class GuestPointerSurface: UIView, UIPointerInteractionDelegate {
+    weak var input: GuestInput?
+    var relative = false
+    var hideHostPointer = true {
+        didSet { if oldValue != hideHostPointer { pointerStyle.invalidate() } }
+    }
+    var reveal: (() -> Void)?
+    private lazy var pointerStyle = UIPointerInteraction(delegate: self)
+    private var drag: CGPoint?
+    private var previousScroll: CGFloat = 0
+    private var lastTap = -Double.infinity
+    private var source: ObjectIdentifier { ObjectIdentifier(self) }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        configure()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        configure()
-    }
-
-    private func configure() {
-        backgroundColor = .black
         isMultipleTouchEnabled = true
-        isUserInteractionEnabled = true
-
-        metalLayer.device = MTLCreateSystemDefaultDevice()
-        metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
-        metalLayer.contentsGravity = .resizeAspect
-        updateDrawableScale()
-
-        let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap(_:)))
-        singleTap.numberOfTouchesRequired = 1
-        addGestureRecognizer(singleTap)
-
-        let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap(_:)))
-        twoFingerTap.numberOfTouchesRequired = 2
-        addGestureRecognizer(twoFingerTap)
-
-        let threeFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleThreeFingerTap(_:)))
-        threeFingerTap.numberOfTouchesRequired = 3
-        addGestureRecognizer(threeFingerTap)
-
-        let dragPan = UIPanGestureRecognizer(target: self, action: #selector(handleOneFingerPan(_:)))
-        dragPan.minimumNumberOfTouches = 1
-        dragPan.maximumNumberOfTouches = 1
-        addGestureRecognizer(dragPan)
-
-        let scrollPan = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerScroll(_:)))
-        scrollPan.minimumNumberOfTouches = 2
-        scrollPan.maximumNumberOfTouches = 2
-        if #available(iOS 13.4, *) {
-            scrollPan.allowedScrollTypesMask = .all
+        addInteraction(pointerStyle)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        let right = UITapGestureRecognizer(target: self, action: #selector(rightTapped))
+        right.numberOfTouchesRequired = 2
+        let controls = UITapGestureRecognizer(target: self, action: #selector(revealControls))
+        controls.numberOfTouchesRequired = 4
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
+        hold.minimumPressDuration = 0.35
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+        pan.maximumNumberOfTouches = 1
+        let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
+        scroll.minimumNumberOfTouches = 2
+        scroll.maximumNumberOfTouches = 2
+        tap.require(toFail: hold)
+        tap.require(toFail: right)
+        tap.require(toFail: controls)
+        pan.require(toFail: hold)
+        for gesture in [tap, right, controls, hold, pan, scroll] {
+            gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            addGestureRecognizer(gesture)
         }
-        addGestureRecognizer(scrollPan)
+        addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:))))
+        isAccessibilityElement = true
+        accessibilityLabel = "Windows input surface"
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Show Windows controls", target: self,
+                                                                  selector: #selector(accessibleReveal))]
+    }
 
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        longPress.minimumPressDuration = 0.45
-        longPress.allowableMovement = 12
-        addGestureRecognizer(longPress)
+    required init?(coder: NSCoder) { fatalError("Constructed in code") }
 
-        if #available(iOS 13.4, *) {
-            let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
-            addGestureRecognizer(hover)
-        }
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        hideHostPointer ? .hidden() : nil
+    }
+
+    func pointerInteraction(_ interaction: UIPointerInteraction, regionFor request: UIPointerRegionRequest,
+                            defaultRegion: UIPointerRegion) -> UIPointerRegion? { defaultRegion }
+
+    func pointerInteraction(_ interaction: UIPointerInteraction, willExit region: UIPointerRegion,
+                            animator: UIPointerInteractionAnimating) {
+        input?.setHover(source, inside: false, point: nil)
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        updateDrawableScale()
+        if window == nil { clearInput() }
+    }
+
+    func clearInput() {
+        input?.setHover(source, inside: false, point: nil)
+        input?.release(source)
+        drag = nil
+    }
+
+    @objc private func accessibleReveal() -> Bool { revealControls(); return true }
+    @objc private func revealControls() { reveal?() }
+
+    @objc private func hovered(_ gesture: UIHoverGestureRecognizer) {
+        let inside = gesture.state == .began || gesture.state == .changed
+        let point = relative ? nil : normalized(gesture)
+        input?.setHover(source, inside: inside, point: point)
+    }
+
+    @objc private func tapped(_ gesture: UITapGestureRecognizer) {
+        if !relative { input?.absolute(normalized(gesture)) }
+        lastTap = CACurrentMediaTime()
+        input?.click(1)
+    }
+
+    @objc private func rightTapped() { input?.click(2) }
+
+    @objc private func held(_ gesture: UILongPressGestureRecognizer) {
+        track(gesture, holdsButton: true)
+    }
+
+    @objc private func panned(_ gesture: UIPanGestureRecognizer) {
+        track(gesture, holdsButton: !relative || CACurrentMediaTime() - lastTap < 0.32)
+        if gesture.state == .began { lastTap = -Double.infinity }
+    }
+
+    private func track(_ gesture: UIGestureRecognizer, holdsButton: Bool) {
+        let point = gesture.location(in: self)
+        switch gesture.state {
+        case .began:
+            drag = point
+            if !relative { input?.absolute(normalized(gesture)) }
+            if holdsButton { input?.set(1, source: source, down: true) }
+        case .changed:
+            if relative, let previous = drag {
+                input?.move(dx: point.x - previous.x, dy: point.y - previous.y,
+                            width: bounds.width, height: bounds.height)
+            } else if !relative { input?.absolute(normalized(gesture)) }
+            drag = point
+        case .ended, .cancelled, .failed:
+            input?.release(source)
+            drag = nil
+        default: break
+        }
+    }
+
+    @objc private func scrolled(_ gesture: UIPanGestureRecognizer) {
+        let position = gesture.translation(in: self).y
+        if gesture.state == .began { previousScroll = position }
+        if gesture.state == .changed {
+            input?.scroll(points: position - previousScroll)
+            previousScroll = position
+        }
+    }
+
+    private func normalized(_ gesture: UIGestureRecognizer) -> CGPoint {
+        GuestDisplayGeometry.normalized(gesture.location(in: self), in: bounds)
+    }
+}
+
+final class MetalCanvasUIView: GuestPointerSurface, UIKeyInput {
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    private let keyboardSuppressor = UIView(frame: .zero)
+    var acceptsGuestFocus = false
+    var frameRate = 0 {
+        didSet { if oldValue != frameRate { applyFrameRate() } }
+    }
+    var typing = false {
+        didSet { if oldValue != typing && isFirstResponder { reloadInputViews() } }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("Constructed in code") }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
         if window != nil {
+            applyFrameRate()
             WinIOSBridge.shared.bindMetalLayer(metalLayer)
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        updateDrawableScale()
+        let scale = window?.screen.scale ?? traitCollection.displayScale
+        let maximum = window?.bounds.size ?? bounds.size
+        let bounded = min(1, max(maximum.width, maximum.height) / max(1, bounds.width, bounds.height))
+        let drawable = CGSize(width: max(1, bounds.width * scale * bounded), height: max(1, bounds.height * scale * bounded))
+        if metalLayer.drawableSize != drawable { metalLayer.drawableSize = drawable }
+        if let size = window?.bounds.size { WinIOSBridge.shared.updateScreenSize(size, scale: scale) }
     }
 
-    private func updateDrawableScale() {
-        let scale = window?.screen.scale ?? UIScreen.main.scale
-        contentScaleFactor = scale
-        metalLayer.contentsScale = scale
-        let w = max(1.0, bounds.width * scale)
-        let h = max(1.0, bounds.height * scale)
-        metalLayer.drawableSize = CGSize(width: w, height: h)
-        if let winBounds = window?.bounds.size, winBounds.width > 0 {
-            WinIOSBridge.shared.updateScreenSize(winBounds, scale: scale)
-        }
+    private func applyFrameRate() {
+        guard let maximum = window?.screen.maximumFramesPerSecond else { return }
+        WinIOSBridge.shared.setPresentationRate(UInt32(max(1, min(120, maximum, frameRate == 0 ? 60 : frameRate))))
     }
-
-    private func normalizedPoint(for pt: CGPoint) -> (Double, Double) {
-        let bw = max(1.0, bounds.width)
-        let bh = max(1.0, bounds.height)
-        let fbW = Double(WinIOSBridge.shared.framebufferWidth)
-        let fbH = Double(WinIOSBridge.shared.framebufferHeight)
-
-        var rect = bounds
-        if fbW > 0 && fbH > 0 {
-            let viewAspect = Double(bw / bh)
-            let fbAspect = fbW / fbH
-            if viewAspect > fbAspect {
-                let fittedW = CGFloat(Double(bh) * fbAspect)
-                rect = CGRect(x: (bw - fittedW) * 0.5, y: 0, width: fittedW, height: bh)
-            } else {
-                let fittedH = CGFloat(Double(bw) / fbAspect)
-                rect = CGRect(x: 0, y: (bh - fittedH) * 0.5, width: bw, height: fittedH)
-            }
-        }
-        let nx = min(1.0, max(0.0, Double((pt.x - rect.minX) / max(1.0, rect.width))))
-        let ny = min(1.0, max(0.0, Double((pt.y - rect.minY) / max(1.0, rect.height))))
-        return (nx, ny)
-    }
-
-    @objc private func handleSingleTap(_ gr: UITapGestureRecognizer) {
-        guard gr.state == .ended else { return }
-        tapHaptic.impactOccurred(intensity: 0.45)
-        let mask: UInt8
-        if rightClickArmed {
-            rightClickArmed = false
-            onRightClickConsumed?()
-            mask = 2
-        } else {
-            mask = 1
-        }
-        if trackpadMode {
-            PointerController.shared.clickAtCurrent(buttonMask: mask)
-        } else {
-            let (nx, ny) = normalizedPoint(for: gr.location(in: self))
-            PointerController.shared.directTapAt(x: nx, y: ny, buttonMask: mask)
-        }
-    }
-
-    @objc private func handleTwoFingerTap(_ gr: UITapGestureRecognizer) {
-        guard gr.state == .ended else { return }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.6)
-        PointerController.shared.clickAtCurrent(buttonMask: 2)
-    }
-
-    @objc private func handleThreeFingerTap(_ gr: UITapGestureRecognizer) {
-        guard gr.state == .ended else { return }
-        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-        onThreeFingerTap?()
-    }
-
-    @objc private func handleLongPress(_ gr: UILongPressGestureRecognizer) {
-        guard gr.state == .began else { return }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        if trackpadMode {
-            PointerController.shared.clickAtCurrent(buttonMask: 2)
-        } else {
-            let (nx, ny) = normalizedPoint(for: gr.location(in: self))
-            PointerController.shared.directTapAt(x: nx, y: ny, buttonMask: 2)
-        }
-    }
-
-    @objc private func handleOneFingerPan(_ gr: UIPanGestureRecognizer) {
-        let loc = gr.location(in: self)
-        switch gr.state {
-        case .began:
-            panLastPoint = loc
-            if !trackpadMode {
-                let (nx, ny) = normalizedPoint(for: loc)
-                activeDragButtons = rightClickArmed ? 2 : 1
-                if rightClickArmed {
-                    rightClickArmed = false
-                    onRightClickConsumed?()
-                }
-                PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: activeDragButtons)
-            }
-        case .changed:
-            if trackpadMode {
-                let dx = loc.x - panLastPoint.x
-                let dy = loc.y - panLastPoint.y
-                panLastPoint = loc
-                PointerController.shared.moveRelative(
-                    dxPoints: dx,
-                    dyPoints: dy,
-                    padWidth: bounds.width,
-                    padHeight: bounds.height,
-                    extraButtons: activeDragButtons
-                )
-            } else {
-                let (nx, ny) = normalizedPoint(for: loc)
-                PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: activeDragButtons)
-            }
-        case .ended, .cancelled, .failed:
-            if activeDragButtons != 0 {
-                activeDragButtons = 0
-                PointerController.shared.moveAbsolute(
-                    x: PointerController.shared.cursorX,
-                    y: PointerController.shared.cursorY,
-                    extraButtons: 0
-                )
-            }
-        default:
-            break
-        }
-    }
-
-    @objc private func handleTwoFingerScroll(_ gr: UIPanGestureRecognizer) {
-        let trans = gr.translation(in: self)
-        if gr.state == .began {
-            scrollAccum = 0
-        } else if gr.state == .changed {
-            let delta = trans.y - scrollAccum
-            if abs(delta) >= 12 {
-                let steps = Int(delta / 12)
-                scrollAccum += CGFloat(steps) * 12
-                let clamped = Int8(clamping: max(-8, min(8, steps)))
-                PointerController.shared.scroll(steps: clamped)
-            }
-        }
-    }
-
-    @objc private func handleHover(_ gr: UIHoverGestureRecognizer) {
-        let (nx, ny) = normalizedPoint(for: gr.location(in: self))
-        PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: activeDragButtons)
-    }
-
-    // MARK: - Software & Hardware Keyboard (USB HID Page 0x07)
 
     override var canBecomeFirstResponder: Bool { true }
+    override var inputView: UIView? { typing ? nil : keyboardSuppressor }
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
-        for ch in text {
-            sendCharacterAsHID(ch)
-        }
+        guard typing else { return }
+        input?.typeText(text)
     }
 
-    func deleteBackward() {
-        WinIOSBridge.shared.tapKeyHid(0x2a) // Backspace
-    }
+    func deleteBackward() { input?.keyStroke(0x2a) }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var handled = false
-        for press in presses {
-            if let key = press.key {
-                let code = key.keyCode.rawValue
-                if code >= 0x04 && code <= 0xe7 {
-                    WinIOSBridge.shared.sendKeyHid(UInt8(code), down: true)
-                    handled = true
-                }
-            }
-        }
-        if !handled { super.pressesBegan(presses, with: event) }
+        let remaining = send(presses, down: true)
+        if !remaining.isEmpty { super.pressesBegan(remaining, with: event) }
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var handled = false
-        for press in presses {
-            if let key = press.key {
-                let code = key.keyCode.rawValue
-                if code >= 0x04 && code <= 0xe7 {
-                    WinIOSBridge.shared.sendKeyHid(UInt8(code), down: false)
-                    handled = true
-                }
-            }
-        }
-        if !handled { super.pressesEnded(presses, with: event) }
+        let remaining = send(presses, down: false)
+        if !remaining.isEmpty { super.pressesEnded(remaining, with: event) }
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        pressesEnded(presses, with: event)
+        input?.reset()
+        let remaining = send(presses, down: false)
+        if !remaining.isEmpty { super.pressesCancelled(remaining, with: event) }
     }
 
-    private func sendCharacterAsHID(_ ch: Character) {
-        guard let (usage, shift) = Self.asciiToHID(ch) else { return }
-        if shift { WinIOSBridge.shared.sendKeyHid(0xe1, down: true) }
-        WinIOSBridge.shared.sendKeyHid(usage, down: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            WinIOSBridge.shared.sendKeyHid(usage, down: false)
-            if shift { WinIOSBridge.shared.sendKeyHid(0xe1, down: false) }
+    private func send(_ presses: Set<UIPress>, down: Bool) -> Set<UIPress> {
+        var unknown: Set<UIPress> = []
+        var usages: [UInt8] = []
+        for press in presses {
+            if let code = press.key?.keyCode.rawValue, (0x04...0xe7).contains(code) {
+                usages.append(UInt8(code))
+            } else { unknown.insert(press) }
         }
+        for usage in usages.sorted(by: down ? (>) : (<)) { input?.key(usage, down: down) }
+        return unknown
     }
 
     static func asciiToHID(_ ch: Character) -> (UInt8, Bool)? {
@@ -314,28 +248,54 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
 }
 
 struct MetalDisplayView: UIViewRepresentable {
-    @Binding var trackpadMode: Bool
-    @Binding var rightClickArmed: Bool
-    @Binding var keyboardVisible: Bool
-    var onThreeFingerTap: () -> Void
+    let input: GuestInput
+    let relative: Bool
+    let hideHostPointer: Bool
+    let typing: Bool
+    let frameRate: Int
+    let focused: Bool
+    let reveal: () -> Void
 
-    func makeUIView(context: Context) -> MetalCanvasUIView {
-        let view = MetalCanvasUIView(frame: .zero)
-        view.onThreeFingerTap = onThreeFingerTap
-        view.onRightClickConsumed = {
-            DispatchQueue.main.async { self.rightClickArmed = false }
-        }
-        return view
+    func makeUIView(context: Context) -> MetalCanvasUIView { MetalCanvasUIView(frame: .zero) }
+
+    func updateUIView(_ view: MetalCanvasUIView, context: Context) {
+        view.input = input
+        view.relative = relative
+        view.hideHostPointer = hideHostPointer
+        view.reveal = reveal
+        view.typing = typing
+        view.frameRate = frameRate
+        if focused {
+            if !view.isFirstResponder {
+                DispatchQueue.main.async { [weak view] in
+                    guard let view, view.window != nil, view.acceptsGuestFocus else { return }
+                    _ = view.becomeFirstResponder()
+                }
+            }
+        } else if view.isFirstResponder { view.resignFirstResponder() }
+        view.acceptsGuestFocus = focused
     }
 
-    func updateUIView(_ uiView: MetalCanvasUIView, context: Context) {
-        uiView.trackpadMode = trackpadMode
-        uiView.rightClickArmed = rightClickArmed
-        uiView.onThreeFingerTap = onThreeFingerTap
-        if keyboardVisible && !uiView.isFirstResponder {
-            DispatchQueue.main.async { _ = uiView.becomeFirstResponder() }
-        } else if !keyboardVisible && uiView.isFirstResponder {
-            DispatchQueue.main.async { _ = uiView.resignFirstResponder() }
-        }
+    static func dismantleUIView(_ view: MetalCanvasUIView, coordinator: ()) {
+        view.acceptsGuestFocus = false
+        view.clearInput()
+        view.resignFirstResponder()
+        WinIOSBridge.shared.bindMetalLayer(nil)
+    }
+}
+
+struct GuestTrackpad: UIViewRepresentable {
+    let input: GuestInput
+    let hideHostPointer: Bool
+    let reveal: () -> Void
+
+    func makeUIView(context: Context) -> GuestPointerSurface { GuestPointerSurface(frame: .zero) }
+
+    func updateUIView(_ view: GuestPointerSurface, context: Context) {
+        view.input = input
+        view.relative = true
+        view.hideHostPointer = hideHostPointer
+        view.reveal = reveal
+        view.accessibilityLabel = "Windows trackpad"
     }
 }

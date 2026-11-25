@@ -21,6 +21,7 @@ struct InstallationAssistant: View {
     @State private var hasVars = false
     @State private var freeDiskBytes: Int?
     @State private var error: String?
+    @AppStorage("session.defaultScaling") private var defaultScaling = GuestDisplayGeometry.Scaling.fit
 
     private let store = InstallationDraftStore(root: URL.applicationSupportDirectory.appendingPathComponent("Installation"))
     private let repository = VMFiles.repository
@@ -42,7 +43,9 @@ struct InstallationAssistant: View {
                     }
                 }
             }
-            .navigationTitle("Create Virtual Machine")
+            .windowsColumn()
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("Install Windows")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -118,6 +121,15 @@ struct InstallationAssistant: View {
         case .hardware, .storage, .review:
             TextField("Name", text: $draft.name)
             HardwareFields(hardware: $draft.hardware)
+            Section("Screen") {
+                Picker("Host scaling", selection: Binding(get: {
+                    draft.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? defaultScaling
+                }, set: { draft.displayScaling = $0.rawValue })) {
+                    ForEach(GuestDisplayGeometry.Scaling.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text("Windows chooses its boot resolution from the firmware's supported modes.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Section {
                 ForEach([64, 128, 256], id: \.self) { size in
                     Button {
@@ -411,6 +423,7 @@ struct InstallationAssistant: View {
             var preparing = draft
             preparing.stage = .preparing
             preparing.installationMethod = draft.method
+            preparing.displayScaling = draft.displayScaling ?? defaultScaling.rawValue
             preparing.lastError = nil
             try store.save(preparing)
             draft = preparing
@@ -435,8 +448,16 @@ struct InstallationAssistant: View {
                         let prepareTarget: ((URL) throws -> Void)? = directTarget.map { guid in
                             { disk in try InstallerPreparation.makeDirectTarget(disk, capacityGiB: input.capacityGiB, guid: guid) }
                         }
+                        let edition: String?
+                        if let index = input.editionIndex {
+                            edition = source.images.first { $0.index == index }?.name
+                        } else if input.method == .direct, source.images.count == 1 || source.images.allSatisfy({ $0.editionID != nil }) {
+                            edition = try? WindowsImageMetadata.directImage(in: source.images, requested: nil).name
+                        } else {
+                            edition = nil
+                        }
                         return try store.prepare(input, repository: repository, firmware: firmware, installer: stageDisk,
-                                                 prepareTarget: prepareTarget)
+                                                 prepareTarget: prepareTarget, windowsEdition: edition)
                     }
                     preparationTask = work
                     defer { preparationTask = nil }

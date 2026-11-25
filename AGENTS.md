@@ -6,3 +6,4 @@
 - Preserve the existing ARM64 translation engine, 4 KiB guest MMU, display, input, audio, networking and OAuth unless a requested change requires touching them.
 - Reuse the sparse disk format and preserve source archives, existing VM disks and writable per-VM NVRAM. Treat imported structures as untrusted input.
 - Use [TESTING.md](TESTING.md) for verification and update [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) with the evidence. Record Xcode build, simulator and physical-device results separately.
+- Keep the UI overhaul on `feat/henge-ui-overhaul`, based on the published DISM build `fefa1a6`. Treat older manifests as valid and keep guest framebuffer modes separate from host scaling. Preserve the existing boot and provisioning paths.

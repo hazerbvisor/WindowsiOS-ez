@@ -1,681 +1,379 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import GameController
 import SwiftUI
 import UIKit
 
 struct SessionView: View {
     @ObservedObject var vm: VMViewModel
-    private let uiHaptic = UIImpactFeedbackGenerator(style: .light)
+    let leave: () -> Void
+    @StateObject private var input = GuestInput()
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.displayScale) private var displayScale
+    @AppStorage("session.hideHostPointer") private var hideHostPointer = true
+    @AppStorage("session.relativeInput") private var defaultRelative = false
+    @AppStorage("session.sensitivity") private var sensitivity = 1.0
+    @AppStorage("session.scrollSpeed") private var scrollSpeed = 1.0
+    @AppStorage("session.naturalScroll") private var naturalScroll = true
+    @AppStorage("session.autoHide") private var autoHide = false
+    @AppStorage("session.toolbarTop") private var toolbarTop = true
+    @AppStorage("session.frameRate") private var frameRate = 0
+    @State private var relative = false
+    @State private var typing = false
+    @State private var controls = true
+    @State private var details = false
+    @State private var power = false
+    @State private var clipboard = false
+    @State private var scaling: GuestDisplayGeometry.Scaling = .fit
+    @State private var zoom: CGFloat = 1
+    @State private var pinchStart: CGFloat?
+    @State private var panStart: CGSize?
+    @State private var offset: CGSize = .zero
+    @State private var hideTask: Task<Void, Never>?
+    @State private var isVisible = false
+
+    private var focused: Bool {
+        isVisible && vm.isVMRunning && scenePhase == .active && !details && !power && !clipboard && !editingZoom && vm.activeSafariURL == nil
+    }
 
     var body: some View {
-        GeometryReader { geo in
-            let size = geo.size
-            let laptopActive = vm.isLaptopLayoutActive(for: size)
-
-            ZStack {
-                Color(red: 0.02, green: 0.025, blue: 0.04).ignoresSafeArea()
-
-                // Invisible UIKit host for iOS 27.1 UIHingeInteraction & system edge-gesture deferral
-                HingeSensorView { statusRaw, angleDeg in
-                    vm.updateHinge(statusRaw: statusRaw, angleDegrees: angleDeg, viewportSize: size)
+        GeometryReader { geometry in
+            let portrait = geometry.size.height > geometry.size.width && !input.hasExternalInput && vm.isVMRunning
+            VStack(spacing: 0) {
+                ZStack {
+                    display
+                    if !vm.isVMRunning { bootPanel }
+                    if !portrait && controls && vm.isVMRunning {
+                        toolbar.frame(maxHeight: .infinity, alignment: toolbarTop ? .top : .bottom)
+                            .padding(.top, toolbarTop ? max(8, geometry.safeAreaInsets.top) + 6 : 0)
+                            .padding(.bottom, toolbarTop ? 0 : max(8, geometry.safeAreaInsets.bottom) + 6)
+                    }
                 }
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-
-                if laptopActive {
-                    surfaceLaptopClamshellLayout(geo: geo)
-                        .transition(.opacity)
-                } else {
-                    surfaceStudioOpenLayout(geo: geo)
-                        .transition(.opacity)
+                if portrait {
+                    if controls { toolbar.padding(.vertical, 7) }
+                    if !typing { trackpad.frame(height: max(105, geometry.size.height * 0.30)) }
                 }
-
-                if !vm.isVMRunning {
-                    surfaceHeroBootOverlay(viewportSize: size, laptopActive: laptopActive)
-                        .padding(20)
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: laptopActive ? size.height * 0.50 : .infinity,
-                            alignment: .center
-                        )
-                        .frame(maxHeight: .infinity, alignment: laptopActive ? .top : .center)
-                }
-            }
-            .onChange(of: size) { _, newSize in
-                WinIOSBridge.shared.updateScreenSize(newSize, scale: UIScreen.main.scale)
-            }
-            .sheet(item: $vm.activeSafariURL) { item in
-                SafariSheet(url: item.url)
-                    .ignoresSafeArea()
-                    .preferredColorScheme(.dark)
             }
         }
-        .ignoresSafeArea()
-        .alert("Clipboard Text", isPresented: Binding(
-            get: { vm.clipboardError != nil }, set: { if !$0 { vm.clipboardError = nil } }
-        )) {
-            Button("OK", role: .cancel) { vm.clipboardError = nil }
-        } message: {
-            Text(vm.clipboardError ?? "")
-        }
-        .onDisappear { vm.cancelClipboardTyping() }
+        .background(Color.black.ignoresSafeArea())
+        .ignoresSafeArea(edges: [.horizontal, .top])
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .defersSystemGestures(on: .all)
-    }
-
-    // MARK: - 1. Sleek Midnight-Sapphire Surface Laptop Ultra Clamshell Mode (Folded)
-
-    @ViewBuilder
-    private func surfaceLaptopClamshellLayout(geo: GeometryProxy) -> some View {
-        let totalW = geo.size.width
-        let totalH = geo.size.height
-        let lidH = (totalH * 0.50).rounded(.down)
-        let deckH = max(180.0, totalH - lidH)
-        let topCameraBezel = max(geo.safeAreaInsets.top > 20 ? geo.safeAreaInsets.top - 8 : 9.0, 9.0)
-
-        VStack(spacing: 0) {
-            // TOP 50%: Razor-Bezel Obsidian-Glass Surface Display Lid
-            ZStack {
-                // Anodized Midnight-Obsidian Lid Chassis + Diamond-Cut Outer Rim
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.038, green: 0.046, blue: 0.072),
-                                Color(red: 0.020, green: 0.024, blue: 0.038),
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color(red: 0.64, green: 0.75, blue: 0.96).opacity(0.28),
-                                        Color(red: 0.45, green: 0.56, blue: 0.78).opacity(0.10),
-                                        Color.black.opacity(0.60),
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: 0.85
-                            )
-                    )
-
-                VStack(spacing: 0) {
-                    // Top Micro-Bezel with Windows Hello Studio Camera + IR Sensor Array
-                    ZStack {
-                        HStack(spacing: 7) {
-                            Circle()
-                                .fill(Color(red: 0.10, green: 0.12, blue: 0.18))
-                                .frame(width: 3.5, height: 3.5)
-                            ZStack {
-                                Circle()
-                                    .fill(Color(red: 0.05, green: 0.07, blue: 0.12))
-                                    .frame(width: 5.5, height: 5.5)
-                                    .overlay(Circle().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.4))
-                                Circle()
-                                    .fill(Color(red: 0.45, green: 0.65, blue: 1.0).opacity(0.55))
-                                    .frame(width: 1.6, height: 1.6)
-                                    .offset(x: -0.8, y: -0.8)
-                            }
-                            Circle()
-                                .fill(vm.isJITLive ? Color.white.opacity(0.32) : Color.orange.opacity(0.6))
-                                .frame(width: 2.4, height: 2.4)
-                        }
-                    }
-                    .frame(height: topCameraBezel)
-
-                    // Edge-to-Edge PixelSense-Style Display Glass
-                    MetalDisplayView(
-                        trackpadMode: $vm.trackpadMode,
-                        rightClickArmed: $vm.rightClickArmed,
-                        keyboardVisible: .constant(false),
-                        onThreeFingerTap: {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                                vm.postureMode = .fullScreen
-                            }
-                        }
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5.5, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5)
-                    )
-                    .padding(.horizontal, 6)
-
-                    // Whisper-Minimal Lower Display Chin (zero toolbar clutter!)
-                    ZStack {
-                        HStack(spacing: 5) {
-                            WindowsLogoMark(size: 7.5, color: Color.white.opacity(0.22))
-                            Text("SURFACE")
-                                .font(.system(size: 7.5, weight: .semibold))
-                                .tracking(2.2)
-                                .foregroundStyle(Color.white.opacity(0.22))
-                        }
-
-                        HStack {
-                            Spacer()
-                            // Discreet posture switch micro-trigger in bottom-right bezel corner
-                            Button {
-                                uiHaptic.impactOccurred(intensity: 0.5)
-                                vm.cyclePostureMode(viewportSize: geo.size)
-                            } label: {
-                                Text(vm.hingeAngleDegrees.map { String(format: "%.0f°", $0) } ?? vm.postureMode.rawValue.uppercased())
-                                    .font(.system(size: 8.0, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(Color.white.opacity(0.28))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 10)
-                    }
-                    .frame(height: 15)
-                }
-            }
-            .frame(width: totalW, height: lidH)
-
-            // BOTTOM 50%: Midnight-Sapphire CNC Aluminum Surface Keyboard + Haptic Glass Touchpad Deck
-            LaptopDeckView(vm: vm)
-                .frame(width: totalW, height: deckH)
+        .sheet(isPresented: $details) {
+            SessionDetails(vm: vm, scaling: $scaling, relative: relative, leave: leave)
         }
-        .frame(width: totalW, height: totalH)
-    }
-
-    // MARK: - 2. Open / Unfolded Surface Book Studio Mode (180° Flat Inner / Landscape Canvas)
-
-    @ViewBuilder
-    private func surfaceStudioOpenLayout(geo: GeometryProxy) -> some View {
-        let w = geo.size.width
-        let h = geo.size.height
-        let isPortrait = h > w
-        let safeTop = max(geo.safeAreaInsets.top + 8.0, isPortrait ? 54.0 : 12.0)
-        let safeBottom = max(geo.safeAreaInsets.bottom + 8.0, 12.0)
-
-        ZStack {
-            // Sculpted Obsidian-Sapphire Studio Backdrop (eliminates dead-flat black letterbox bars!)
-            studioObsidianBackdrop(size: geo.size)
-
-            if isPortrait {
-                // Unfolded Portrait Studio Canvas: Framed PixelSense Display + Sleek Studio Telemetry & Quick Deck
-                VStack(spacing: 14) {
-                    Spacer(minLength: safeTop + (vm.controlBarVisible ? 44 : 8))
-
-                    // Precision Diamond-Cut Framed Display
-                    framedStudioDisplay(
-                        maxWidth: w - 20,
-                        maxHeight: min((w - 20) * 0.76, h * 0.64)
-                    )
-
-                    // Subtle Monospaced Hardware Spec Strip + Studio Quick Pad
-                    surfaceStudioFooterStrip(viewportSize: geo.size)
-                        .padding(.horizontal, 18)
-
-                    Spacer(minLength: safeBottom)
-                }
-            } else {
-                // Landscape Open Canvas: Maximum Edge-to-Edge Framed Display
-                framedStudioDisplay(
-                    maxWidth: w - 16,
-                    maxHeight: h - 14
-                )
-            }
-
-            // Floating Smoked-Obsidian Surface Command Pill
-            VStack {
-                if vm.controlBarVisible {
-                    surfaceStudioCommandPill(viewportSize: geo.size)
-                        .padding(.top, safeTop)
-                        .padding(.horizontal, 14)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                } else {
-                    HStack {
-                        Spacer()
-                        Button {
-                            uiHaptic.impactOccurred()
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
-                                vm.controlBarVisible = true
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(vm.isJITLive ? Color.white.opacity(0.85) : Color.orange)
-                                    .frame(width: 5, height: 5)
-                                WindowsLogoMark(size: 10, color: .white.opacity(0.90))
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color(red: 0.05, green: 0.065, blue: 0.11).opacity(0.82), in: Capsule())
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(Color(red: 0.72, green: 0.82, blue: 1.0).opacity(0.24), lineWidth: 0.65)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, safeTop)
-                        .padding(.trailing, 16)
-                    }
-                }
-                Spacer()
-            }
+        .sheet(item: $vm.activeSafariURL) { item in SafariSheet(url: item.url) }
+        .confirmationDialog("Windows power", isPresented: $power, titleVisibility: .visible) {
+            Button("Send Power Button") { WinIOSBridge.shared.pressPowerButton() }
+            Button("Send Ctrl–Alt–Delete") { WinIOSBridge.shared.sendCtrlAltDel() }
+            Button("Stop Virtual Machine", role: .destructive) { WinIOSBridge.shared.stopVM() }
+            Button("Back to Machines") { leave() }
+        } message: {
+            Text("Use Windows to shut down cleanly. Stopping immediately can interrupt guest disk writes.")
+        }
+        .confirmationDialog("Clipboard", isPresented: $clipboard, titleVisibility: .visible) {
+            Button("Type into Windows") { pasteText() }
+            Button("Save as Shared Text File") { shareText() }
+        } message: {
+            Text("Typing uses the Windows keyboard layout and may submit lines in the focused app. Use a shared file for Unicode or large text.")
+        }
+        .alert("Clipboard", isPresented: Binding(get: { vm.clipboardError != nil },
+                                                 set: { if !$0 { vm.clipboardError = nil } })) {
+            Button("OK", role: .cancel) { vm.clipboardError = nil }
+        } message: { Text(vm.clipboardError ?? "") }
+        .onAppear {
+            relative = defaultRelative
+            scaling = vm.initialScaling
+            input.sensitivity = sensitivity
+            input.scrollSpeed = scrollSpeed
+            input.naturalScroll = naturalScroll
+            input.start()
+            isVisible = true
+            input.suspend(!focused)
+            scheduleAutoHide()
+        }
+        .onDisappear {
+            isVisible = false
+            input.stop()
+            hideTask?.cancel()
+        }
+        .onChange(of: focused) { _, value in input.suspend(!value) }
+        .onChange(of: details) { _, presenting in if !presenting { reveal() } }
+        .onChange(of: power) { _, presenting in if !presenting { reveal() } }
+        .onChange(of: typing) { _, _ in scheduleAutoHide() }
+        .onChange(of: scaling) { _, _ in zoom = 1; offset = .zero }
+        .onChange(of: vm.isVMRunning) { _, running in
+            if !running { controls = true; typing = false }
+            scheduleAutoHide()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { note in
+            if let mouse = note.object as? GCMouse { input.connect(mouse) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidDisconnect)) { note in
+            if let mouse = note.object as? GCMouse { input.disconnect(mouse) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in input.refreshAccessories() }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in
+            input.reset()
+            input.refreshAccessories()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            typing = false
         }
     }
 
-    private func studioObsidianBackdrop(size: CGSize) -> some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.024, green: 0.030, blue: 0.050),
-                    Color(red: 0.012, green: 0.015, blue: 0.026),
-                    Color(red: 0.030, green: 0.038, blue: 0.064),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            // Subtle sculpted metallic light ribbon behind the display
-            EllipticalGradient(
-                colors: [
-                    Color(red: 0.20, green: 0.28, blue: 0.46).opacity(0.22),
-                    Color(red: 0.08, green: 0.12, blue: 0.22).opacity(0.06),
-                    Color.clear,
-                ],
-                center: .init(x: 0.5, y: 0.44),
-                startRadiusFraction: 0.05,
-                endRadiusFraction: 0.62
-            )
-        }
-        .ignoresSafeArea()
-    }
-
-    private func framedStudioDisplay(maxWidth: CGFloat, maxHeight: CGFloat) -> some View {
-        let fbAspect: CGFloat = (vm.fbWidth > 0 && vm.fbHeight > 0)
-            ? CGFloat(vm.fbWidth) / CGFloat(vm.fbHeight)
-            : (4.0 / 3.0)
-        let fittedW = min(maxWidth, maxHeight * fbAspect)
-        let fittedH = fittedW / fbAspect
-
-        return ZStack {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.black)
-                .shadow(color: .black.opacity(0.75), radius: 26, x: 0, y: 12)
-
-            MetalDisplayView(
-                trackpadMode: $vm.trackpadMode,
-                rightClickArmed: $vm.rightClickArmed,
-                keyboardVisible: $vm.systemKeyboardVisible,
-                onThreeFingerTap: {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
-                        vm.controlBarVisible.toggle()
-                    }
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
-            .padding(3.5)
-        }
-        .frame(width: fittedW + 7, height: fittedH + 7)
-        .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.72, green: 0.82, blue: 1.0).opacity(0.32),
-                            Color(red: 0.44, green: 0.54, blue: 0.74).opacity(0.12),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.85
-                )
-        )
-    }
-
-    private func surfaceStudioFooterStrip(viewportSize: CGSize) -> some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text("DEVICE_NAME = SURFACE_DUO_ULTRA")
-                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(Color(red: 0.72, green: 0.80, blue: 0.95).opacity(0.55))
-
-                Spacer()
-
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(vm.isJITLive ? Color.white.opacity(0.75) : Color.orange)
-                        .frame(width: 4.5, height: 4.5)
-                    Text("WIN11 ARM64 · 4.5 GB")
-                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.45))
+    private var display: some View {
+        GeometryReader { geometry in
+            let pixels = CGSize(width: CGFloat(vm.fbWidth), height: CGFloat(vm.fbHeight))
+            let frame = GuestDisplayGeometry.frame(viewport: geometry.size, pixels: pixels, displayScale: displayScale,
+                                                   scaling: scaling, zoom: zoom, offset: offset)
+            ZStack(alignment: .topLeading) {
+                Color.black
+                MetalDisplayView(input: input, relative: relative, hideHostPointer: hideHostPointer,
+                                 typing: typing, frameRate: frameRate, focused: focused, reveal: reveal)
+                    .frame(width: max(1, frame.width), height: max(1, frame.height))
+                    .position(x: frame.midX, y: frame.midY)
+                if scaling == .zoom {
+                    zoomSurface(size: geometry.size, pixels: pixels)
                 }
             }
-
-            // Quick Studio Action Strip for Portrait Open Mode
-            HStack(spacing: 8) {
-                studioQuickTile(title: "Laptop Deck", icon: "laptopcomputer", prominent: true) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                        vm.postureMode = .laptop
-                        vm.systemKeyboardVisible = false
-                    }
-                    SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
-                }
-
-                studioQuickTile(title: "Antigravity", icon: "sparkles") {
-                    vm.launchGuestAntigravity()
-                }
-
-                studioQuickTile(title: "Paint", icon: "paintbrush.pointed") {
-                    vm.launchGuestPaint()
-                }
-
-                studioQuickTile(title: "Edge Web", icon: "globe") {
-                    vm.launchGuestEdgeBrowser()
-                }
-
-                studioQuickTile(title: "Explorer", icon: "folder") {
-                    WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x08)
-                }
-
-                studioQuickTile(title: "Keyboard", icon: "keyboard", active: vm.systemKeyboardVisible) {
-                    vm.systemKeyboardVisible.toggle()
-                }
-            }
+            .contentShape(Rectangle())
+            .clipped()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(red: 0.055, green: 0.070, blue: 0.115).opacity(0.72))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color(red: 0.68, green: 0.78, blue: 0.98).opacity(0.16), lineWidth: 0.65)
-                )
-        )
     }
 
-    private func studioQuickTile(
-        title: String,
-        icon: String,
-        active: Bool = false,
-        prominent: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
+    private func zoomSurface(size: CGSize, pixels: CGSize) -> some View {
+        // Zoom editing is explicit so two-finger scrolling and guest drags keep their input surface.
+        ZoomEditingSurface(editing: $editingZoom, zoom: $zoom, offset: $offset, reveal: reveal,
+                           zoomChanged: { value in
+                               let first = pinchStart ?? zoom
+                               pinchStart = first
+                               zoom = max(1, min(4, first * value))
+                           }, zoomEnded: { pinchStart = nil }, panChanged: { translation in
+                               let first = panStart ?? offset
+                               panStart = first
+                               let fit = GuestDisplayGeometry.frame(viewport: size, pixels: pixels,
+                                                                    displayScale: displayScale, scaling: .zoom, zoom: zoom)
+                               let x = max(0, (fit.width - size.width) / 2)
+                               let y = max(0, (fit.height - size.height) / 2)
+                               offset = CGSize(width: max(-x, min(x, first.width + translation.width)),
+                                               height: max(-y, min(y, first.height + translation.height)))
+                           }, panEnded: { panStart = nil })
+    }
+
+    @State private var editingZoom = false
+
+    private var trackpad: some View {
+        VStack(spacing: 1) {
+            GuestTrackpad(input: input, hideHostPointer: hideHostPointer, reveal: reveal)
+                .background(Color(uiColor: .secondarySystemBackground))
+            HStack(spacing: 1) {
+                GuestMouseButton(input: input, label: "Left click", mask: 1)
+                GuestMouseButton(input: input, label: "Right click", mask: 2)
+            }
+            .frame(height: 44)
+        }
+        .clipShape(.rect(cornerRadius: 18))
+        .padding([.horizontal, .bottom], 12)
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 4) {
+            control("Hide Controls", "chevron.compact.up") { controls = false }
+            control(typing ? "Hide Keyboard" : "Show Keyboard", "keyboard") { typing.toggle() }
+            control("Clipboard", "clipboard") { clipboard = true }
+            control("Zoom", "plus.magnifyingglass") {
+                if scaling == .zoom && editingZoom { editingZoom = false }
+                else { scaling = .zoom; editingZoom = true }
+                if editingZoom { hideTask?.cancel() }
+            }
+            control(relative ? "Switch to Direct Touch" : "Switch to Trackpad", relative ? "trackpad" : "hand.point.up.left") {
+                input.reset()
+                relative.toggle()
+            }
+            control("Session Details", "info.circle") { details = true }
+            control("Power and Exit", "power") { power = true }
+        }
+        .padding(4)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.horizontal, 7)
+        .overlay(alignment: toolbarTop ? .bottom : .top) {
+            if typing && controls { modifierBar.offset(y: toolbarTop ? 49 : -49) }
+        }
+        .zIndex(1)
+    }
+
+    private func control(_ label: String, _ icon: String, action: @escaping () -> Void) -> some View {
         Button {
-            uiHaptic.impactOccurred(intensity: 0.6)
             action()
+            scheduleAutoHide()
         } label: {
-            VStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 13.5, weight: .medium))
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(
-                active || prominent
-                    ? Color(red: 0.05, green: 0.07, blue: 0.11)
-                    : Color(red: 0.92, green: 0.95, blue: 1.0)
-            )
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(
-                        active || prominent
-                            ? Color(red: 0.88, green: 0.93, blue: 1.0)
-                            : Color(red: 0.10, green: 0.13, blue: 0.20).opacity(0.85)
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Color.white.opacity(active || prominent ? 0.0 : 0.10), lineWidth: 0.5)
-            )
+            Image(systemName: icon).frame(width: 39, height: 44)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
-    // MARK: - Smoked-Obsidian Surface Studio Floating Command Pill
-
-    private func surfaceStudioCommandPill(viewportSize: CGSize) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                // Authentic 4-pane Start button
-                Button {
-                    uiHaptic.impactOccurred(intensity: 0.65)
-                    WinIOSBridge.shared.sendWindowsKey()
-                } label: {
-                    HStack(spacing: 6) {
-                        WindowsLogoMark(size: 10.5, color: Color(red: 0.05, green: 0.07, blue: 0.11))
-                        Text("Start")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(Color(red: 0.05, green: 0.07, blue: 0.11))
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6.5)
-                    .background(Color(red: 0.90, green: 0.94, blue: 1.0), in: Capsule())
-                }
-                .buttonStyle(.plain)
-
-                studioPillItem(icon: "laptopcomputer", label: "Laptop") {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                        vm.postureMode = .laptop
-                        vm.systemKeyboardVisible = false
-                    }
-                    SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
-                }
-
-                studioPillItem(icon: "sparkles", label: "Antigravity") {
-                    vm.launchGuestAntigravity()
-                }
-
-                studioPillItem(icon: "paintbrush.pointed", label: "Paint") {
-                    vm.launchGuestPaint()
-                }
-
-                studioPillItem(icon: "globe", label: "Edge") {
-                    vm.launchGuestEdgeBrowser()
-                }
-
-                studioPillItem(
-                    icon: vm.useSafariForOAuth ? "safari" : "network",
-                    label: vm.useSafariForOAuth ? "OAuth: Safari" : "OAuth: Edge",
-                    active: vm.useSafariForOAuth
-                ) {
-                    vm.toggleOAuthBrowserMode()
-                }
-
-                studioPillItem(icon: "keyboard", label: "Keys", active: vm.systemKeyboardVisible) {
-                    vm.systemKeyboardVisible.toggle()
-                }
-
-                studioPillItem(
-                    icon: vm.trackpadMode ? "rectangle.and.hand.point.up.left" : "hand.tap",
-                    label: vm.trackpadMode ? "Trackpad" : "Touch",
-                    active: vm.trackpadMode
-                ) {
-                    vm.trackpadMode.toggle()
-                }
-
-                if vm.usbKeyboardReady {
-                    PasteButton(payloadType: String.self) { payload in
-                        if let text = payload.first { vm.typeClipboardText(text) }
-                    }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Type clipboard text in Windows")
-                }
-
-                studioPillItem(icon: "computermouse", label: "R-Click", active: vm.rightClickArmed) {
-                    vm.rightClickArmed.toggle()
-                }
-
-                studioPillItem(icon: "waveform.path.ecg", label: "Task Mgr") {
-                    WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe0), NSNumber(value: 0xe1)], key: 0x29)
-                }
-
-                studioPillItem(icon: "power", label: "") {
-                    WinIOSBridge.shared.pressPowerButton()
-                }
-
-                studioPillItem(icon: "chevron.up", label: "") {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
-                        vm.controlBarVisible = false
-                    }
-                }
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6.5)
-            .background(
-                Capsule()
-                    .fill(Color(red: 0.045, green: 0.058, blue: 0.096).opacity(0.88))
-            )
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(Color(red: 0.72, green: 0.82, blue: 1.0).opacity(0.22), lineWidth: 0.65)
-            )
-            .shadow(color: .black.opacity(0.55), radius: 14, x: 0, y: 6)
-        }
-    }
-
-    private func studioPillItem(
-        icon: String,
-        label: String,
-        active: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            uiHaptic.impactOccurred(intensity: 0.6)
-            action()
-        } label: {
-            HStack(spacing: 4.5) {
-                Image(systemName: icon)
-                    .font(.system(size: 11.5, weight: .medium))
-                if !label.isEmpty {
-                    Text(label)
-                        .font(.system(size: 11.5, weight: .medium))
-                }
-            }
-            .foregroundStyle(
-                active
-                    ? Color(red: 0.05, green: 0.07, blue: 0.11)
-                    : Color(red: 0.92, green: 0.95, blue: 1.0)
-            )
-            .padding(.horizontal, label.isEmpty ? 9 : 10.5)
-            .padding(.vertical, 6.5)
-            .background(
-                Capsule().fill(
-                    active
-                        ? Color(red: 0.86, green: 0.92, blue: 1.0)
-                        : Color.white.opacity(0.07)
-                )
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: - 3. SURFACE_LAPTOP_ULTRA Boot / Portal Hero Overlay
-
-    private func surfaceHeroBootOverlay(viewportSize: CGSize, laptopActive: Bool) -> some View {
-        VStack(spacing: laptopActive ? 11 : 16) {
+    private var modifierBar: some View {
+        ScrollView(.horizontal) {
             HStack(spacing: 9) {
-                WindowsLogoMark(size: laptopActive ? 14 : 17, color: .white)
-                Text("SURFACE LAPTOP ULTRA")
-                    .font(.system(size: laptopActive ? 13.5 : 15.5, weight: .semibold, design: .monospaced))
-                    .tracking(2.0)
-                    .foregroundStyle(.white)
-            }
-
-            Text("DEVICE_NAME = IPHONE_DUO_ARM64")
-                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                .tracking(1.4)
-                .foregroundStyle(Color(red: 0.72, green: 0.82, blue: 1.0).opacity(0.65))
-
-            Text(vm.vmStatusText)
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.white.opacity(0.82))
-                .multilineTextAlignment(.center)
-
-            if vm.isUnpacking {
-                ProgressView(value: vm.unpackProgress, total: 1.0)
-                    .tint(.white)
-                    .frame(maxWidth: 260)
-            }
-
-            HStack(spacing: 14) {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(vm.isJITLive ? Color.white : Color.orange)
-                        .frame(width: 5.5, height: 5.5)
-                    Text(vm.isJITLive ? "TXM JIT LIVE" : vm.jitStatusText.uppercased())
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.80))
+                ForEach([UInt8(0xe0), 0xe2, 0xe1, 0xe3], id: \.self) { key in
+                    let label = [0xe0: "Ctrl", 0xe2: "Alt", 0xe1: "Shift", 0xe3: "Win"][Int(key)] ?? "Modifier"
+                    Button(label) { input.toggleModifier(key) }
+                        .tint(input.modifiers.contains(key) ? .blue : .secondary)
                 }
-
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
-
-                Text("\(vm.availableMemoryMB) MB HEADROOM")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.60))
-            }
-
-            if !vm.isUnpacking {
-                HStack(spacing: 10) {
-                    if !vm.isJITLive {
-                        Button {
-                            vm.requestStikDebugJIT()
-                        } label: {
-                            Text("ENABLE JIT")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .tracking(1.0)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 9)
-                                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6))
-                        }
-                        .buttonStyle(.plain)
+                Button("Esc") { input.keyStroke(0x29) }
+                Button("Tab") { input.keyStroke(0x2b) }
+                Menu("F keys") {
+                    ForEach(1...12, id: \.self) { index in
+                        Button("F\(index)") { input.keyStroke(UInt8(0x39 + index)) }
                     }
-
-                    Button {
-                        vm.startOrRetry()
-                    } label: {
-                        Text(vm.isJITLive ? vm.bootActionTitle : "RETRY BOOT")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .tracking(1.1)
-                            .foregroundStyle(Color(red: 0.04, green: 0.05, blue: 0.09))
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 9)
-                            .background(Color(red: 0.92, green: 0.95, blue: 1.0), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                }
+                ForEach([UInt8(0x50), 0x52, 0x51, 0x4f], id: \.self) { key in
+                    let label = [0x50: "←", 0x52: "↑", 0x51: "↓", 0x4f: "→"][Int(key)] ?? "Arrow"
+                    Button(label) { input.keyStroke(key) }
                 }
             }
+            .padding(.horizontal, 10)
         }
-        .padding(laptopActive ? 18 : 26)
-        .frame(maxWidth: 420)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(red: 0.04, green: 0.052, blue: 0.088).opacity(0.92))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.74, green: 0.84, blue: 1.0).opacity(0.32),
-                            Color(red: 0.40, green: 0.50, blue: 0.72).opacity(0.10),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.8
-                )
-        )
-        .shadow(color: .black.opacity(0.70), radius: 24, x: 0, y: 10)
+        .scrollIndicators(.hidden)
+        .buttonStyle(.bordered)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 410)
+        .background(.regularMaterial, in: Capsule())
+    }
+
+    private var bootPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(vm.installationSession?.title ?? "Windows").font(.title.bold())
+            Text(vm.vmStatusText)
+            Text(vm.jitStatusText).font(.footnote).foregroundStyle(.secondary)
+            if vm.isUnpacking {
+                ProgressView(value: vm.unpackProgress)
+            } else if !vm.needsRelaunchToStart {
+                Button(vm.isJITLive ? vm.bootActionTitle : "Retry Boot") { vm.startOrRetry() }
+                    .buttonStyle(.borderedProminent)
+                if !vm.isJITLive {
+                    Button("Open StikDebug") { vm.requestStikDebugJIT() }
+                }
+            }
+            Button("Back to Machines", action: leave)
+        }
+        .padding(24)
+        .frame(maxWidth: 415, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .padding()
+    }
+
+    private func reveal() {
+        controls = true
+        scheduleAutoHide()
+    }
+
+    private func pasteText() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        guard vm.usbKeyboardReady, normalized.utf8.count <= 1024,
+              normalized.utf8.allSatisfy({ $0 == 9 || $0 == 10 || (32...126).contains($0) }) else {
+            vm.clipboardError = "Keyboard paste needs a connected guest keyboard and up to 1024 ASCII characters. Save a shared text file for other text."
+            return
+        }
+        clipboard = false
+        input.suspend(!focused)
+        input.typeText(normalized)
+    }
+
+    private func shareText() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        let directory = URL.documentsDirectory.appendingPathComponent("Shared", isDirectory: true)
+        let file = directory.appendingPathComponent("Clipboard-\(UUID().uuidString.prefix(8)).txt")
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try Data(text.utf8).write(to: file, options: .withoutOverwriting)
+                }.value
+                vm.clipboardError = "Saved \(file.lastPathComponent) in Shared."
+            } catch { vm.clipboardError = error.localizedDescription }
+        }
+    }
+
+    private func scheduleAutoHide() {
+        hideTask?.cancel()
+        guard autoHide, vm.isVMRunning, controls, !typing, !editingZoom else { return }
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { controls = false }
+        }
+    }
+}
+
+private struct ZoomEditingSurface: View {
+    @Binding var editing: Bool
+    @Binding var zoom: CGFloat
+    @Binding var offset: CGSize
+    let reveal: () -> Void
+    let zoomChanged: (CGFloat) -> Void
+    let zoomEnded: () -> Void
+    let panChanged: (CGSize) -> Void
+    let panEnded: () -> Void
+
+    var body: some View {
+        if editing {
+            Color.clear.contentShape(Rectangle())
+                .gesture(DragGesture().onChanged { panChanged($0.translation) }.onEnded { _ in panEnded() })
+                .simultaneousGesture(MagnifyGesture().onChanged { zoomChanged($0.magnification) }.onEnded { _ in zoomEnded() })
+                .overlay(alignment: .bottom) {
+                    HStack {
+                        Text("Pinch to zoom. Drag to pan.").font(.footnote)
+                        Button("Reset") { zoom = 1; offset = .zero }
+                        Button("Done") { editing = false; reveal() }
+                    }
+                    .padding(12).background(.regularMaterial, in: Capsule()).padding(.bottom, 20)
+                }
+        }
+    }
+}
+
+private struct SessionDetails: View {
+    @ObservedObject var vm: VMViewModel
+    @Binding var scaling: GuestDisplayGeometry.Scaling
+    let relative: Bool
+    let leave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Performance") {
+                    LabeledContent("RAM requested", value: vm.hardwareSummary)
+                    LabeledContent("Available host memory", value: "\(vm.availableMemoryMB) MiB")
+                    LabeledContent("Requested JIT cache", value: vm.requestedJITSummary)
+                    LabeledContent("Mapped JIT cache", value: "\(WinIOSBridge.shared.mappedJITMiB) MiB")
+                    LabeledContent("JIT", value: vm.jitStatusText)
+                }
+                Section("Display") {
+                    LabeledContent("Guest resolution", value: vm.fbWidth > 0 ? "\(vm.fbWidth) × \(vm.fbHeight)" : "Unavailable")
+                    Picker("Scaling", selection: $scaling) {
+                        ForEach(GuestDisplayGeometry.Scaling.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    LabeledContent("Frames presented", value: vm.presentedFrames.formatted())
+                }
+                Section("Input") {
+                    LabeledContent("Touch mode", value: relative ? "Relative trackpad" : "Direct")
+                    LabeledContent("Guest USB keyboard", value: vm.usbKeyboardReady ? "Connected" : "Waiting")
+                    LabeledContent("Guest USB tablet", value: vm.usbTabletReady ? "Connected" : "Waiting")
+                }
+                Section("Sharing") {
+                    LabeledContent("Shared folder", value: WinIOSBridge.shared.guestShareAvailable ? "Available" : "Unavailable")
+                    Text("On My iPad or On My iPhone → WindowsiOS-ez → Shared. In Windows, use a WebDAV client with http://10.0.2.4/.")
+                }
+                Section {
+                    NavigationLink("Diagnostics") { DiagnosticsView(vm: vm) }
+                    Button("Back to Machines") { dismiss(); leave() }
+                }
+            }
+            .navigationTitle("Session Details")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
     }
 }

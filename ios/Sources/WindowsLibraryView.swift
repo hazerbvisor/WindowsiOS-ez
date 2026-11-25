@@ -5,29 +5,59 @@ import UIKit
 struct WindowsLibraryView: View {
     let vm: VMViewModel
 
+    enum Tab { case machines, install, settings }
+    @State private var tab = Tab.machines
+    @State private var beginInstall = false
+    @AppStorage("appearance") private var appearance = WindowsAppearance.system
+
     var body: some View {
-        TabView {
-            MachineLibraryView(vm: vm)
-                .tabItem { Label("Virtual Machines", systemImage: "desktopcomputer") }
+        TabView(selection: $tab) {
+            MachineLibraryView(vm: vm, beginInstall: $beginInstall)
+                .tabItem { Label("Machines", systemImage: "desktopcomputer") }
+                .tag(Tab.machines)
             NavigationStack {
-                MediaLibraryView()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            WindowsMark()
+                            Text("Windows 11").font(.title2.bold())
+                            Text("24H2 · ARM64").foregroundStyle(.secondary)
+                            Button {
+                                tab = .machines
+                                beginInstall = true
+                            } label: { Label("Create Virtual Machine", systemImage: "plus") }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .windowsCard()
+                        NavigationLink { MediaLibraryView() } label: {
+                            Label("Downloads and ISO Imports", systemImage: "arrow.down.circle")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .windowsCard()
+                        }
+                    }
+                    .padding(16)
+                    .windowsColumn()
+                }
+                .background(Color(uiColor: .systemGroupedBackground))
+                .navigationTitle("Install")
             }
-            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
-            NavigationStack {
-                JITSettingsView(vm: vm)
-            }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            NavigationStack {
-                DiagnosticsView(vm: vm)
-            }
-            .tabItem { Label("Diagnostics", systemImage: "waveform.path.ecg") }
+            .tabItem { Label("Install", systemImage: "arrow.down.circle") }
+            .tag(Tab.install)
+            NavigationStack { AppSettingsView(vm: vm) }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(Tab.settings)
         }
+        .tint(Color(red: 0.19, green: 0.40, blue: 0.82))
+        .preferredColorScheme(appearance.scheme)
         .task { ImportInboxModel.shared.refresh() }
     }
 }
 
 private struct MachineLibraryView: View {
     @ObservedObject var vm: VMViewModel
+    @Binding var beginInstall: Bool
+    @AppStorage("session.defaultScaling") private var defaultScaling = GuestDisplayGeometry.Scaling.fit
     @State private var machines: [VirtualMachine] = []
     @State private var activeMachine: VirtualMachine?
     @State private var editor: VirtualMachine?
@@ -48,7 +78,7 @@ private struct MachineLibraryView: View {
 
     var body: some View {
         NavigationStack {
-            machineConfirmations
+            machinePresentations
                 .alert("Local Backup Saved", isPresented: Binding(
                     get: { localBackup != nil }, set: { if !$0 { localBackup = nil } }
                 )) {
@@ -62,72 +92,100 @@ private struct MachineLibraryView: View {
                     Text(error ?? "")
                 }
         }
+        .modifier(MachineConfirmations(deleteCandidate: $deleteCandidate, installedCandidate: $installedCandidate,
+                                       remove: { machine in
+                                           guard !sessionBusy, !busy else { return }
+                                           editor = nil
+                                           doFileWork { try repo.remove(machine) }
+                                       }, adopt: adoptInstalledDisk))
+    }
+
+    private var featured: VirtualMachine? {
+        activeMachine.flatMap { active in machines.first { $0.id == active.id } }
+            ?? machines.max { ($0.lastOpened ?? .distantPast) < ($1.lastOpened ?? .distantPast) }
     }
 
     private var machineList: some View {
-        List {
-            if sessionBusy {
-                Button { showSession = true } label: {
-                    Label(activeMachine?.name ?? "Windows 11", systemImage: "play.rectangle")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if busy {
+                    if let importProgress { ImportProgressView(progress: importProgress) }
+                    else { ProgressView("Working with machine files…") }
                 }
-                .accessibilityHint("Return to the active virtual machine")
-            }
-            if !sessionBusy, let activeMachine, !vm.needsRelaunchToStart {
-                Section {
-                    Text(vm.vmStatusText).foregroundStyle(.secondary)
-                } header: {
-                    Text(activeMachine.name)
+                if vm.needsRelaunchToStart {
+                    Label("Reopen the app to start another session.", systemImage: "arrow.clockwise")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
-            }
-            if vm.needsRelaunchToStart {
-                Section {
-                    Label("Reopen the app to start a new session.", systemImage: "arrow.clockwise")
+                if sessionBusy && activeMachine == nil {
+                    Button("Resume Windows", systemImage: "play.rectangle") { showSession = true }
                 }
-            }
-            if busy {
-                if let importProgress { ImportProgressView(progress: importProgress) }
-                else { ProgressView("Working with machine files…") }
-            }
-            if machines.isEmpty && !hasLegacy && !busy && !sessionBusy {
-                ContentUnavailableView {
-                    Label("No virtual machines", systemImage: "desktopcomputer")
-                } description: {
-                    Text("Prepare a new virtual disk or import a folder with a prepared Windows machine.")
-                } actions: {
-                    Button("Create Virtual Machine") { showAssistant = true }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            ForEach(machines) { machine in
-                machineRow(machine)
-            }
-            ImportInboxSection(kinds: [.machine, .disk], disabled: busy || sessionBusy) { entry in
-                importMachine(kind: entry.kind, selection: ImportSelection(entry.url))
-            }
-            if hasLegacy {
-                Section {
-                    Button { start(nil) } label: {
-                        Label("Windows 11", systemImage: "desktopcomputer")
+                if let featured {
+                    MachineHero(machine: featured, directory: repo.directory(for: featured), running: isActive(featured),
+                                jitReady: vm.isJITLive, canStart: canStart(featured),
+                                open: { editor = featured }, launch: { launch(featured) })
+                    let others = machines.filter { $0.id != featured.id }
+                    if !others.isEmpty {
+                        Text("Other Machines").font(.headline)
+                        VStack(spacing: 12) {
+                            ForEach(others) { machine in
+                                Button { editor = machine } label: {
+                                    HStack {
+                                        Image(systemName: "desktopcomputer").foregroundStyle(.tint)
+                                        VStack(alignment: .leading) {
+                                            Text(machine.name).font(.headline)
+                                            Text(machine.installation == .preparedDisk ? "Windows 11" : "Ready to install")
+                                                .font(.subheadline).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .windowsCard()
                     }
-                    .disabled(sessionBusy || busy || vm.needsRelaunchToStart)
-                } header: {
-                    Text("Existing installation")
-                } footer: {
-                    Text("Uses your prepared disk and firmware in Files.")
+                } else if !busy && !hasLegacy && !sessionBusy {
+                    ContentUnavailableView {
+                        Label("No virtual machines", systemImage: "desktopcomputer")
+                    } description: {
+                        Text("Install Windows or import an existing virtual machine.")
+                    } actions: {
+                        Button("Install Windows") { showAssistant = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .windowsCard()
+                }
+                ImportInboxSection(kinds: [.machine, .disk], disabled: busy || sessionBusy) { entry in
+                    importMachine(kind: entry.kind, selection: ImportSelection(entry.url))
+                }
+                if hasLegacy {
+                    Button("Start Existing Files Installation", systemImage: "desktopcomputer") { start(nil) }
+                        .disabled(sessionBusy || busy || vm.needsRelaunchToStart)
+                        .windowsCard()
                 }
             }
+            .padding(16)
+            .windowsColumn()
         }
-        .navigationTitle("Virtual Machines")
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Machines")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button("Create Virtual Machine", systemImage: "plus") { showAssistant = true }
-                    Button("Import Folder", systemImage: "folder") { pickerRequest = DocumentPickerRequest(kind: .machine) }
-                    Button("Import Disk Image", systemImage: "externaldrive") { pickerRequest = DocumentPickerRequest(kind: .disk) }
+                    Button("Install Windows", systemImage: "plus") { showAssistant = true }
+                    Button("Import Virtual Machine", systemImage: "folder") { pickerRequest = DocumentPickerRequest(kind: .machine) }
+                    Button("Import Virtual Disk", systemImage: "externaldrive") { pickerRequest = DocumentPickerRequest(kind: .disk) }
                 } label: {
                     Label("Add Virtual Machine", systemImage: "plus")
                 }
                 .disabled(busy || sessionBusy)
+            }
+        }
+        .onChange(of: beginInstall) { _, request in
+            if request {
+                beginInstall = false
+                if !busy && !sessionBusy { showAssistant = true }
             }
         }
         .refreshable { refresh() }
@@ -140,136 +198,95 @@ private struct MachineLibraryView: View {
     private var machinePresentations: some View {
         machineList
             .documentPicker($pickerRequest, exported: { _ in cleanExports() }, selected: importMachine)
-            .sheet(item: $editor) { machine in
-                MachineEditor(machine: machine, directory: repo.directory(for: machine)) { edited in
-                    try repo.update(edited)
-                    refresh()
+            .navigationDestination(isPresented: Binding(get: { editor != nil }, set: { if !$0 { editor = nil } })) {
+                if let machine = editor {
+                    MachineEditor(machine: machine, directory: repo.directory(for: machine), editable: !sessionBusy && !busy,
+                                  save: { edited in
+                                      try repo.update(edited)
+                                      editor = edited
+                                      refresh()
+                                  }) {
+                        machineActions(machine)
+                    }
+                    .id(machine.id)
                 }
             }
             .sheet(isPresented: $showAssistant, onDismiss: closeAssistant) {
                 InstallationAssistant(vm: vm) { setupAfterAssistant = $0 }
             }
-            .fullScreenCover(isPresented: $showSession) { machineSession }
-    }
-
-    private var machineConfirmations: some View {
-        machinePresentations
-            .confirmationDialog("Delete virtual machine?", isPresented: deletionPresented, presenting: deleteCandidate) { machine in
-                Button("Delete \(machine.name)", role: .destructive) {
-                    deleteCandidate = nil
-                    guard !sessionBusy, !busy else { return }
-                    doFileWork { try repo.remove(machine) }
-                }
-            } message: { machine in
-                Text("This permanently deletes the managed disk and firmware state for \(machine.name).")
-            }
-            .confirmationDialog("Use the installed Windows disk?", isPresented: installedPresented, presenting: installedCandidate) { machine in
-                Button("Use Installed Disk and Remove Setup Disk") {
-                    installedCandidate = nil
-                    adoptInstalledDisk(machine, removeInstaller: true)
-                }
-                Button("Use Installed Disk and Keep Setup Disk") {
-                    installedCandidate = nil
-                    adoptInstalledDisk(machine, removeInstaller: false)
-                }
-            } message: { _ in
-                Text("Continue after installation has finished and the guest has shut down. The app checks the primary disk for ARM64 Windows boot files before switching.")
-            }
+            .fullScreenCover(isPresented: $showSession, onDismiss: refresh) { machineSession }
     }
 
     private var machineSession: some View {
-        SessionView(vm: vm)
-            .preferredColorScheme(.dark)
-            .overlay(alignment: .topLeading) {
-                Button {
-                    showSession = false
-                } label: {
-                    Label("Library", systemImage: "chevron.backward")
-                        .padding(6)
-                }
-                .buttonStyle(.borderedProminent)
-                .padding()
+        SessionView(vm: vm) {
+            vm.saveDesktopPreview()
+            if var machine = activeMachine, vm.fbWidth > 0, vm.fbHeight > 0 {
+                machine.lastGuestWidth = vm.fbWidth
+                machine.lastGuestHeight = vm.fbHeight
+                try? repo.update(machine)
+                activeMachine = machine
             }
+            showSession = false
+        }
+        .preferredColorScheme(.dark)
     }
 
     private var sessionBusy: Bool { vm.isVMRunning || vm.isUnpacking }
-
-    private var deletionPresented: Binding<Bool> {
-        Binding(get: { deleteCandidate != nil }, set: { if !$0 { deleteCandidate = nil } })
-    }
-
-    private var installedPresented: Binding<Bool> {
-        Binding(get: { installedCandidate != nil }, set: { if !$0 { installedCandidate = nil } })
-    }
 
     private var errorPresented: Binding<Bool> {
         Binding(get: { error != nil }, set: { if !$0 { error = nil } })
     }
 
-    private func machineRow(_ machine: VirtualMachine) -> some View {
-        let installer = repo.directory(for: machine).appendingPathComponent(VMRepository.installerDisk)
-        let hasInstaller = FileManager.default.fileExists(atPath: installer.path)
-        let direct = machine.installationMethod == .direct
-        return HStack {
-            Label {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(machine.name).font(.headline)
-                    Text(machine.installation == .preparedDisk ? "Prepared Windows disk"
-                         : hasInstaller ? (direct ? "DISM installation ready" : "Graphical Setup ready")
-                         : "Awaiting Windows installation")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-            } icon: {
-                Image(systemName: "desktopcomputer").foregroundStyle(.tint)
+    private func isActive(_ machine: VirtualMachine) -> Bool {
+        sessionBusy && activeMachine?.id == machine.id
+    }
+
+    private func canStart(_ machine: VirtualMachine) -> Bool {
+        isActive(machine) || (!sessionBusy && !busy && !vm.needsRelaunchToStart &&
+            (machine.installation == .preparedDisk || FileManager.default.fileExists(atPath: installer(for: machine).path)))
+    }
+
+    private func installer(for machine: VirtualMachine) -> URL {
+        repo.directory(for: machine).appendingPathComponent(VMRepository.installerDisk)
+    }
+
+    private func launch(_ machine: VirtualMachine) {
+        if isActive(machine) { showSession = true }
+        else { start(machine, installer: machine.installation == .blankDisk ? installer(for: machine) : nil) }
+    }
+
+    @ViewBuilder private func machineActions(_ machine: VirtualMachine) -> some View {
+        let installerURL = installer(for: machine)
+        let hasInstaller = FileManager.default.fileExists(atPath: installerURL.path)
+        Section("Session") {
+            Button(isActive(machine) ? "Resume" : "Start", systemImage: "play") { launch(machine) }
+                .disabled(!canStart(machine))
+            if machine.installation == .blankDisk {
+                Button("Use Installed Windows Disk", systemImage: "checkmark.circle") { installedCandidate = machine }
+                    .disabled(sessionBusy)
             }
-            Spacer()
-            Menu {
-                if machine.installation == .preparedDisk {
-                    Button("Start", systemImage: "play") { start(machine) }
-                        .disabled(sessionBusy || vm.needsRelaunchToStart)
-                } else {
-                    if hasInstaller {
-                        Button(direct ? "Start DISM Provisioning" : "Start Graphical Setup", systemImage: "play") {
-                            start(machine, installer: installer)
-                        }
-                            .disabled(sessionBusy || vm.needsRelaunchToStart)
-                    }
-                    if !direct, let mediaID = machine.mediaID {
-                        Button(hasInstaller ? "Update Windows Setup Disk" : "Build Windows Setup Disk", systemImage: "opticaldisc") {
-                            buildInstaller(for: mediaID, output: installer)
-                        }
-                        .disabled(sessionBusy)
-                    }
-                    Button("Use Installed Windows Disk", systemImage: "checkmark.circle") { installedCandidate = machine }
-                        .disabled(sessionBusy)
-                }
-                if FileManager.default.fileExists(atPath: repo.directory(for: machine)
-                    .appendingPathComponent(VMRepository.setupLogs).path) {
-                    Button("Export Installation Logs", systemImage: "square.and.arrow.up") { exportSetupLogs(machine) }
-                        .disabled(sessionBusy)
-                }
-                if activeMachine?.id == machine.id && vm.isVMRunning {
-                    Button("Send Power Button", systemImage: "power") { WinIOSBridge.shared.pressPowerButton() }
-                }
-                Button("Edit Configuration", systemImage: "slider.horizontal.3") { editor = machine }
-                    .disabled(sessionBusy)
-                Button("Duplicate", systemImage: "plus.square.on.square") {
-                    doFileWork { _ = try repo.duplicate(machine, copyDisk: VMFiles.copyDisk) }
-                }
-                .disabled(sessionBusy)
-                Button(shouldKeepBackupLocal(machine) ? "Save Local VM Backup" : "Export to Files",
-                       systemImage: "square.and.arrow.up") { exportMachine(machine) }
-                    .disabled(sessionBusy)
-                Button("Delete", systemImage: "trash", role: .destructive) { deleteCandidate = machine }
-                    .disabled(sessionBusy)
-            } label: {
-                Label("Actions for \(machine.name)", systemImage: "ellipsis.circle")
-                    .labelStyle(.iconOnly)
-                    .font(.title3)
-            }
-            .disabled(busy)
         }
-        .padding(.vertical, 5)
+        Section("Manage") {
+            if machine.installation == .blankDisk, machine.installationMethod != .direct, let mediaID = machine.mediaID {
+                Button(hasInstaller ? "Update Graphical Setup Disk" : "Build Graphical Setup Disk",
+                       systemImage: "opticaldisc") { buildInstaller(for: mediaID, output: installerURL) }
+                    .disabled(sessionBusy || busy)
+            }
+            if FileManager.default.fileExists(atPath: repo.directory(for: machine)
+                .appendingPathComponent(VMRepository.setupLogs).path) {
+                Button("Export Installation Logs", systemImage: "square.and.arrow.up") { exportSetupLogs(machine) }
+                    .disabled(sessionBusy || busy)
+            }
+            Button("Duplicate", systemImage: "plus.square.on.square") {
+                doFileWork { _ = try repo.duplicate(machine, copyDisk: VMFiles.copyDisk) }
+            }
+            .disabled(sessionBusy || busy)
+            Button(shouldKeepBackupLocal(machine) ? "Save Local VM Backup" : "Export Virtual Machine",
+                   systemImage: "square.and.arrow.up") { exportMachine(machine) }
+                .disabled(sessionBusy || busy)
+            Button("Delete Virtual Machine", systemImage: "trash", role: .destructive) { deleteCandidate = machine }
+                .disabled(sessionBusy || busy)
+        }
     }
 
     private func closeAssistant() {
@@ -284,8 +301,14 @@ private struct MachineLibraryView: View {
     private func start(_ machine: VirtualMachine?, installer: URL? = nil) {
         guard !sessionBusy, !busy, !vm.needsRelaunchToStart else { return }
         activeMachine = machine
+        if var opened = machine {
+            opened.lastOpened = Date()
+            do { try repo.update(opened) } catch { self.error = error.localizedDescription }
+            activeMachine = opened
+        }
         vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
-                installer: installer, useTPM: machine?.usesTPM == true, method: machine?.installationMethod)
+                installer: installer, useTPM: machine?.usesTPM == true, method: machine?.installationMethod,
+                scaling: machine?.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? defaultScaling)
         showSession = true
     }
 
@@ -461,52 +484,181 @@ private struct MachineLibraryView: View {
     }
 }
 
-private struct MachineEditor: View {
-    @Environment(\.dismiss) private var dismiss
+private struct MachineConfirmations: ViewModifier {
+    @Binding var deleteCandidate: VirtualMachine?
+    @Binding var installedCandidate: VirtualMachine?
+    let remove: (VirtualMachine) -> Void
+    let adopt: (VirtualMachine, Bool) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("Delete virtual machine?", isPresented: presentation($deleteCandidate), presenting: deleteCandidate) { machine in
+                Button("Delete \(machine.name)", role: .destructive) { remove(machine); deleteCandidate = nil }
+            } message: { machine in
+                Text("This permanently deletes the managed disk and firmware state for \(machine.name).")
+            }
+            .confirmationDialog("Use the installed Windows disk?", isPresented: presentation($installedCandidate),
+                                presenting: installedCandidate) { machine in
+                Button("Use Installed Disk and Remove Setup Disk") { adopt(machine, true); installedCandidate = nil }
+                Button("Use Installed Disk and Keep Setup Disk") { adopt(machine, false); installedCandidate = nil }
+            } message: { _ in
+                Text("Continue after installation finishes and the guest shuts down. The app checks the primary disk for ARM64 Windows boot files.")
+            }
+    }
+
+    private func presentation(_ candidate: Binding<VirtualMachine?>) -> Binding<Bool> {
+        Binding(get: { candidate.wrappedValue != nil }, set: { if !$0 { candidate.wrappedValue = nil } })
+    }
+}
+
+private struct MachineHero: View {
+    let machine: VirtualMachine
+    let directory: URL
+    let running: Bool
+    let jitReady: Bool
+    let canStart: Bool
+    let open: () -> Void
+    let launch: () -> Void
+    @State private var disk: MachineDiskUsage?
+    @State private var screenshot: UIImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Button(action: open) {
+                VStack(alignment: .leading, spacing: 14) {
+                    preview
+                    HStack(spacing: 12) {
+                        WindowsMark()
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(machine.name).font(.title2.bold())
+                            Text(machine.windowsEdition ?? (machine.mediaID != nil ? "Windows 11 24H2 · ARM64" : "Windows"))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            HStack {
+                Label(running ? "Active" : "Stopped", systemImage: running ? "play.circle" : "stop.circle")
+                Spacer()
+                Label(jitReady ? "JIT Ready" : "JIT Required", systemImage: jitReady ? "bolt.fill" : "bolt.slash")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            Text("\(machine.hardware.preset.title) · \(machine.hardware.vCPUs) vCPU · \(machine.hardware.jitMiB) MiB JIT")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Button(running ? "Resume" : machine.installation == .blankDisk ? "Start Installation" : "Start",
+                   systemImage: "play.fill", action: launch)
+                .buttonStyle(.borderedProminent)
+                .disabled(!canStart)
+            Divider()
+            HStack(alignment: .top) {
+                LabeledContent("Disk", value: disk.map { MachineDiskUsage.text($0.allocated) } ?? "—")
+                Spacer(minLength: 16)
+                if let date = machine.lastOpened {
+                    Text(date, style: .relative).foregroundStyle(.secondary)
+                        .accessibilityLabel("Last opened \(date.formatted())")
+                }
+            }
+            .font(.footnote)
+        }
+        .windowsCard()
+        .task(id: machine) {
+            disk = MachineDiskUsage.read(in: directory)
+            screenshot = UIImage(contentsOfFile: directory.appendingPathComponent(VMRepository.preview).path)
+        }
+    }
+
+    private var preview: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14).fill(Color(uiColor: .tertiarySystemGroupedBackground))
+            if let screenshot {
+                Image(uiImage: screenshot).resizable().scaledToFit()
+                    .accessibilityLabel("Last captured Windows desktop")
+            } else {
+                Image(systemName: "desktopcomputer").font(.system(size: 42, weight: .light))
+                    .foregroundStyle(.secondary).accessibilityHidden(true)
+            }
+        }
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .clipShape(.rect(cornerRadius: 14))
+    }
+}
+
+private struct MachineEditor<Actions: View>: View {
     @State private var draft: VirtualMachine
     @State private var error: String?
-    @State private var diskSize: URLResourceValues?
+    @State private var disk: MachineDiskUsage?
     let directory: URL
+    let editable: Bool
     let save: (VirtualMachine) throws -> Void
+    let actions: () -> Actions
 
-    init(machine: VirtualMachine, directory: URL, save: @escaping (VirtualMachine) throws -> Void) {
+    init(machine: VirtualMachine, directory: URL, editable: Bool, save: @escaping (VirtualMachine) throws -> Void,
+         @ViewBuilder actions: @escaping () -> Actions) {
         _draft = State(initialValue: machine)
         self.directory = directory
+        self.editable = editable
         self.save = save
+        self.actions = actions
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Machine name", text: $draft.name)
-                HardwareFields(hardware: $draft.hardware)
-                Section("Storage") {
-                    if let size = diskSize?.fileSize {
-                        LabeledContent("Virtual capacity", value: ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .binary))
-                    }
-                    if let allocated = diskSize?.fileAllocatedSize {
-                        LabeledContent("Allocated on device", value: ByteCountFormatter.string(fromByteCount: Int64(allocated), countStyle: .file))
+        Form {
+            Section("Identity") {
+                TextField("Machine name", text: $draft.name).disabled(!editable)
+                LabeledContent("Edition", value: draft.windowsEdition ?? "Unavailable")
+                LabeledContent("Version", value: draft.mediaID == nil ? "Unavailable" : "24H2 · ARM64")
+                LabeledContent("Status", value: draft.installation == .preparedDisk ? "Installed" : "Awaiting installation")
+            }
+            HardwareFields(hardware: $draft.hardware).disabled(!editable)
+            Section {
+                Picker("Host scaling", selection: Binding(get: {
+                    draft.displayScaling.flatMap(GuestDisplayGeometry.Scaling.init(rawValue:)) ?? .fit
+                }, set: { draft.displayScaling = $0.rawValue })) {
+                    ForEach(GuestDisplayGeometry.Scaling.allCases, id: \.self) {
+                        Text($0 == .pixelPerfect ? "1:1" : $0.title).tag($0)
                     }
                 }
-                if let error { Text(error).foregroundStyle(.red) }
+                .pickerStyle(.segmented)
+                .disabled(!editable)
+                if let width = draft.lastGuestWidth, let height = draft.lastGuestHeight {
+                    LabeledContent("Last guest resolution", value: "\(width) × \(height)")
+                }
+            } header: {
+                Text("Screen")
+            } footer: {
+                Text("Windows reports the guest resolution in Session Details. Scaling applies when you open the session. Available guest resolutions depend on firmware and Windows.")
             }
-            .navigationTitle("Edit Virtual Machine")
-            .task {
-                let rawDisk = directory.appendingPathComponent(VMRepository.rawDisk)
-                diskSize = try? rawDisk.resourceValues(forKeys: [.fileSizeKey, .fileAllocatedSizeKey])
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        do {
-                            try save(draft)
-                            dismiss()
-                        } catch {
-                            self.error = error.localizedDescription
+            Section("Storage") {
+                if let disk {
+                    LabeledContent("Allocated on device", value: MachineDiskUsage.text(disk.allocated))
+                    LabeledContent("Virtual capacity", value: MachineDiskUsage.text(disk.logical))
+                    if disk.logical > 0 {
+                        ProgressView(value: min(1, Double(disk.allocated) / Double(disk.logical))) {
+                            Text("Physical allocation")
                         }
                     }
+                } else {
+                    Text("Disk usage is unavailable.").foregroundStyle(.secondary)
                 }
+            }
+            actions()
+            if let error { Text(error).foregroundStyle(.red) }
+        }
+        .windowsColumn()
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle(draft.name)
+        .task { disk = MachineDiskUsage.read(in: directory) }
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    do { try save(draft); error = nil }
+                    catch { self.error = error.localizedDescription }
+                }
+                .disabled(!editable)
             }
         }
     }
@@ -514,35 +666,58 @@ private struct MachineEditor: View {
 
 struct HardwareFields: View {
     @Binding var hardware: VMHardware
+    @State private var customJIT = false
     private let maximumJITMiB = WinIOSBridge.shared.maximumJITMiB
+    private let jitSizes = [384, 512, 768, 1024, 1536]
 
     var body: some View {
         Section {
-            Picker("Memory preset", selection: $hardware.preset) {
-                ForEach(HardwarePreset.allCases) { preset in
-                    Text(preset.title).tag(preset)
-                }
+            Picker("Preset", selection: $hardware.preset) {
+                ForEach(HardwarePreset.allCases) { Text($0.title).tag($0) }
             }
             if hardware.preset == .custom {
-                TextField("Guest RAM (MiB)", value: $hardware.customRAMMiB, format: .number)
-                    .keyboardType(.numberPad)
-                TextField("JIT cache (MiB)", value: $hardware.customJITMiB, format: .number)
-                    .keyboardType(.numberPad)
-            } else if let preset = hardware.preset.settings {
-                LabeledContent("Guest RAM", value: "\(preset.ramMiB) MiB")
-                LabeledContent("JIT cache", value: "\(preset.jitMiB) MiB")
+                Stepper("Guest RAM · \(hardware.ramMiB) MiB", onIncrement: { adjustRAM(by: 256) },
+                        onDecrement: { adjustRAM(by: -256) })
+                TextField("Guest RAM (MiB)", value: $hardware.customRAMMiB, format: .number).keyboardType(.numberPad)
+            } else {
+                LabeledContent("Guest RAM", value: hardware.ramMiB == 0 ? "Automatic" : "\(hardware.ramMiB) MiB")
             }
-            Stepper("Virtual CPUs · \(hardware.vCPUs)", value: $hardware.vCPUs, in: 1...4)
         } header: {
-            Text("Hardware")
+            Text("Memory")
         } footer: {
-            if hardware.jitMiB > Int(maximumJITMiB) {
-                Text("This build can request at most \(maximumJITMiB) MiB.")
-            } else if hardware.jitMiB > (HardwarePreset.compatibility.settings?.jitMiB ?? 384) {
-                Text("Larger caches are experimental. Start this VM before enabling JIT so the app can request its selected mapping.")
-            } else if hardware.preset == .automatic {
-                Text("Automatic uses the original device-based memory allocation.")
+            if hardware.ramMiB > 6144 {
+                Text("High guest RAM can cause iPadOS memory pressure or end the app session.")
             }
         }
+        Section("Processors") {
+            Stepper("Virtual CPUs · \(hardware.vCPUs)", value: $hardware.vCPUs, in: 1...4)
+        }
+        Section {
+            Menu {
+                Button("Use Preset") { hardware.jitOverrideMiB = nil; customJIT = hardware.preset == .custom }
+                ForEach(jitSizes.filter { $0 <= Int(maximumJITMiB) }, id: \.self) { value in
+                    Button("\(value) MiB") { hardware.jitOverrideMiB = value; customJIT = false }
+                }
+                Button("Custom") { hardware.jitOverrideMiB = hardware.jitMiB; customJIT = true }
+            } label: { LabeledContent("Requested cache", value: "\(hardware.jitMiB) MiB") }
+            if customJIT || (hardware.jitOverrideMiB == nil && hardware.preset == .custom)
+                || hardware.jitOverrideMiB.map({ !jitSizes.contains($0) }) == true {
+                TextField("JIT cache (MiB)", value: Binding(get: { hardware.jitMiB }, set: { hardware.jitOverrideMiB = $0 }),
+                          format: .number).keyboardType(.numberPad)
+            }
+        } header: {
+            Text("JIT Cache")
+        } footer: {
+            if hardware.jitMiB > Int(maximumJITMiB) {
+                Text("This build supports requests up to \(maximumJITMiB) MiB.")
+            } else {
+                Text("The executable cache is allocated once per app launch. Reopen the app after changing this setting.")
+            }
+        }
+    }
+
+    private func adjustRAM(by delta: Int) {
+        let (updated, overflow) = hardware.customRAMMiB.addingReportingOverflow(delta)
+        if !overflow { hardware.customRAMMiB = max(4096, updated) }
     }
 }

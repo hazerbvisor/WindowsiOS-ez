@@ -22,14 +22,15 @@ struct VMHardware: Codable, Equatable {
     var preset: HardwarePreset = .automatic
     var customRAMMiB = 4608
     var customJITMiB = 384
+    var jitOverrideMiB: Int?
     var vCPUs = 4
 
     var ramMiB: Int { preset.settings?.ramMiB ?? (preset == .custom ? customRAMMiB : 0) }
-    var jitMiB: Int { preset.settings?.jitMiB ?? (preset == .custom ? customJITMiB : 384) }
+    var jitMiB: Int { jitOverrideMiB ?? preset.settings?.jitMiB ?? (preset == .custom ? customJITMiB : 384) }
 
     func validate() throws {
         guard (1...4).contains(vCPUs) else { throw VMError.message("Choose one to four virtual CPUs.") }
-        guard preset != .custom || (ramMiB >= 4096 && jitMiB > 0) else {
+        guard (preset != .custom || ramMiB >= 4096), jitMiB > 0 else {
             throw VMError.message("Windows 11 needs at least 4096 MiB of RAM and a nonzero JIT cache.")
         }
     }
@@ -57,18 +58,26 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     var installation: Installation
     var usesTPM: Bool?
     var installationMethod: WindowsInstallationMethod?
+    var lastOpened: Date?
+    var displayScaling: String?
+    var windowsEdition: String?
+    var lastGuestWidth: UInt32?
+    var lastGuestHeight: UInt32?
     let capacityGiB: Int?
     let mediaID: UUID?
 
     init(id: UUID = UUID(), name: String, hardware: VMHardware = VMHardware(),
          installation: Installation, capacityGiB: Int? = nil, mediaID: UUID? = nil, usesTPM: Bool? = nil,
-         installationMethod: WindowsInstallationMethod? = nil) {
+         installationMethod: WindowsInstallationMethod? = nil,
+         displayScaling: String? = nil, windowsEdition: String? = nil) {
         self.id = id
         self.name = name
         self.hardware = hardware
         self.installation = installation
         self.usesTPM = usesTPM
         self.installationMethod = installationMethod
+        self.displayScaling = displayScaling
+        self.windowsEdition = windowsEdition
         self.capacityGiB = capacityGiB
         self.mediaID = mediaID
     }
@@ -103,6 +112,7 @@ struct VMRepository: Sendable {
     static let packedDisk = "windows11.hvsparse"
     static let firmware = "code.fd"
     static let nvram = "vars.fd"
+    static let preview = "DesktopPreview.png"
     static let setupLogs = "SetupLogs.img"
     static let installerDisk = "installer.img"
     static let tpmState = "TPM"
@@ -147,13 +157,14 @@ struct VMRepository: Sendable {
     func createBlank(id: UUID, name: String, hardware: VMHardware, capacityGiB: Int, mediaID: UUID?,
                      code: URL, variables: URL, installer: URL? = nil,
                      installationMethod: WindowsInstallationMethod? = nil,
-                     prepareTarget: ((URL) throws -> Void)? = nil) throws -> VirtualMachine {
+                     prepareTarget: ((URL) throws -> Void)? = nil, windowsEdition: String? = nil,
+                     displayScaling: String? = nil) throws -> VirtualMachine {
         if installationMethod == .direct, installer == nil || prepareTarget == nil {
             throw VMError.message("DISM provisioning requires both the installer and a new GPT target.")
         }
         let machine = VirtualMachine(id: id, name: name, hardware: hardware, installation: .blankDisk,
                                      capacityGiB: capacityGiB, mediaID: mediaID, usesTPM: true,
-                                     installationMethod: installationMethod)
+                                     installationMethod: installationMethod, displayScaling: displayScaling, windowsEdition: windowsEdition)
         if FileManager.default.fileExists(atPath: directory(for: machine).path) {
             let existing = try loadManifest(in: directory(for: machine))
             var updated = existing
@@ -192,7 +203,8 @@ struct VMRepository: Sendable {
                                      hardware: original?.hardware ?? VMHardware(),
                                      installation: original?.installation ?? .preparedDisk,
                                      capacityGiB: original?.capacityGiB, usesTPM: original?.usesTPM,
-                                     installationMethod: original?.installationMethod)
+                                     installationMethod: original?.installationMethod, displayScaling: original?.displayScaling,
+                                     windowsEdition: original?.windowsEdition)
         try publish(machine) { stage in
             try copyMachineFiles(from: source, to: stage, copyDisk: copyDisk)
             if machine.installation == .preparedDisk {
@@ -222,7 +234,8 @@ struct VMRepository: Sendable {
         let machine = VirtualMachine(name: String(original.name.prefix(95)) + " Copy",
                                      hardware: original.hardware, installation: original.installation,
                                      capacityGiB: original.capacityGiB, mediaID: original.mediaID, usesTPM: original.usesTPM,
-                                     installationMethod: original.installationMethod)
+                                     installationMethod: original.installationMethod, displayScaling: original.displayScaling,
+                                     windowsEdition: original.windowsEdition)
         try publish(machine) { stage in
             try copyMachineFiles(from: directory(for: original), to: stage, copyDisk: copyDisk)
         }

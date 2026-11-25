@@ -12,6 +12,8 @@ typedef void (^WinIOSStateCallback)(void);
 @property (class, nonatomic, readonly) WinIOSBridge *shared;
 
 @property (nonatomic, readonly) BOOL isJITLive;
+@property (nonatomic, readonly) NSUInteger mappedJITMiB;
+@property (nonatomic, readonly) BOOL guestShareAvailable;
 @property (nonatomic, readonly) BOOL isDebuggerAttached;
 @property (nonatomic, readonly) BOOL isVMRunning;
 @property (nonatomic, readonly) BOOL needsRelaunchToStart;
@@ -47,6 +49,7 @@ typedef void (^WinIOSStateCallback)(void);
                             jitMiB:(uint64_t)jitMiB
                               cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:useTPM:ramMiB:jitMiB:cpus:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
+- (void)setPresentationRate:(unsigned int)fps;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
 - (void)updateHingeStatus:(NSInteger)status angleDegrees:(double)angleDegrees;
@@ -62,6 +65,7 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)pressPowerButton;
 - (void)flushDisks;
 - (void)captureDiagnostics;
+- (void)saveDesktopPreviewTo:(NSURL *)destination NS_SWIFT_NAME(saveDesktopPreview(to:));
 - (void)stopVM;
 
 @end

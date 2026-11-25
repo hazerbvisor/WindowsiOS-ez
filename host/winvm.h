@@ -38,6 +38,7 @@ void hv_winvm_storage_diagnostics(char *buffer, size_t capacity);
 
 /* Display & screenshot hooks (any thread) */
 void hv_winvm_set_display_layer(void *ca_metal_layer);
+void hv_winvm_set_presentation_rate(unsigned fps);
 int hv_winvm_display_size(uint32_t *w, uint32_t *h);
 uint64_t hv_winvm_display_frames(void);
 int hv_winvm_save_png(const char *path);
