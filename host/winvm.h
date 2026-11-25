@@ -11,6 +11,8 @@ typedef struct HvWinVmConfig {
     const char *code_fd;      /* 64 MB EDK2 UEFI firmware (read-only) */
     const char *vars_fd;      /* 64 MB UEFI NVRAM (read/write persistent) */
     const char *disk0;        /* Primary NVMe disk image (raw or .hvsparse) */
+    const char *tpm_state_directory; /* Optional private TPM 2.0 state for this VM. */
+    const char *setup_logs_disk; /* Optional writable WinPE diagnostics NVMe. */
     const char *disk1;        /* Optional secondary/installer NVMe disk image (read-only) */
     const char *share_dir;    /* Optional host folder shared over WebDAV at http://10.0.2.4/ */
     const char *share_sock;   /* Path for internal WebDAV Unix domain socket */
@@ -32,6 +34,7 @@ int hv_winvm_run_cpu0(void);
 void hv_winvm_stop(void);
 void hv_winvm_power_button(void);
 void hv_winvm_flush_disks(void);
+void hv_winvm_storage_diagnostics(char *buffer, size_t capacity);
 
 /* Display & screenshot hooks (any thread) */
 void hv_winvm_set_display_layer(void *ca_metal_layer);

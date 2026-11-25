@@ -118,35 +118,48 @@ function JIT26HandleBrk0xf00d(brkResponse) {
     command(brkResponse);
 }
 
-function JIT26PrepareRegion(brkResponse) {
-    let instructionResponse = send_command(`m${pc.toString(16)},4`);
-    log(`instruction at pc: ${instructionResponse}`);
-    let instrU32 = littleEndianHexToU32(instructionResponse);
-    let brkImmediate = extractBrkImmediate(instrU32);
-    
-    if (x0 == 0n && x1 == 0n) {
-        return;
-    }
-
-    let jitPageAddress = x0;
-    if (x0 == 0n) {
-        let requestRXResponse = send_command(`_M${x1.toString(16)},rx`);
-        log(`requestRXResponse = ${requestRXResponse}`);
-        
-        if (!requestRXResponse || requestRXResponse.length === 0) {
-            log(`Failed to allocate RX memory`);
-            return;
+function JIT26PrepareRegion() {
+    const lowLimit = 0x7000000000n;
+    const maxBytes = 1536n * 1024n * 1024n;
+    let address = x0;
+    let fresh = false;
+    // Values 1–3 are failure codes. Valid executable addresses are page aligned.
+    let result = 1n;
+    try {
+        if (x1 < 0x4000n || x1 > maxBytes || (x1 & 0x3fffn) !== 0n) {
+            throw new Error(`Invalid JIT allocation size: ${x1}`);
         }
-        
-        jitPageAddress = BigInt(`0x${requestRXResponse}`);
-        log(`Allocated JIT page at address: 0x${jitPageAddress.toString(16)}`);
+        if (address === 0n) {
+            const response = send_command(`_M${x1.toString(16)},rx`);
+            if (typeof response !== 'string' || /^E[0-9a-f]{2}(?:$|;)/i.test(response) ||
+                !/^[0-9a-f]+$/i.test(response)) {
+                throw new Error(`Debugger RX allocation failed: ${response}`);
+            }
+            address = BigInt(`0x${response}`);
+            fresh = address !== 0n;
+        }
+        if (address === 0n || (address & 0x3fffn) !== 0n || address + x1 > lowLimit) {
+            result = 3n;
+            throw new Error(`RX range 0x${address.toString(16)} + ${x1} is outside the supported TXM window`);
+        }
+        result = 2n;
+        const prepared = prepare_memory_region(address, x1);
+        if (prepared === false || (typeof prepared === 'string' && /^E[0-9a-f]{2}(?:$|;)/i.test(prepared))) {
+            throw new Error(`Debugger could not prepare RX pages: ${prepared}`);
+        }
+        log(`Prepared ${x1} RX bytes at 0x${address.toString(16)}`);
+        result = address;
+    } catch (error) {
+        log(error.message);
+        if (fresh) {
+            try {
+                log(`RX deallocation: ${send_command(`_m${address.toString(16)}`)}`);
+            } catch (deallocationError) {
+                log(deallocationError.message);
+            }
+        }
     }
-
-    let prepareJITPageResponse = prepare_memory_region(jitPageAddress, x1);
-    log(`prepareJITPageResponse = ${prepareJITPageResponse}`);
-
-    let putX0Response = send_command(`P0=${numberToLittleEndianHexString(jitPageAddress)};thread:${tid};`);
-    log(`putX0Response = ${putX0Response}`);
+    log(`RX register response: ${send_command(`P0=${numberToLittleEndianHexString(result)};thread:${tid};`)}`);
 }
 
 // utilities
@@ -156,7 +169,7 @@ function littleEndianHexStringToNumber(hexStr) {
         bytes.push(parseInt(hexStr.substr(i, 2), 16));
     }
     let num = 0n;
-    for (let i = 4; i >= 0; i--) {
+    for (let i = bytes.length - 1; i >= 0; i--) {
         num = (num << 8n) | BigInt(bytes[i]);
     }
     return num;
@@ -164,12 +177,9 @@ function littleEndianHexStringToNumber(hexStr) {
 
 function numberToLittleEndianHexString(num) {
     const bytes = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
         bytes.push(Number(num & 0xFFn));
         num >>= 8n;
-    }
-    while (bytes.length < 8) {
-        bytes.push(0);
     }
     return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
 }

@@ -1,0 +1,30 @@
+workflows:
+  windowsios-ez-unsigned:
+    name: WindowsiOS-ez unsigned iOS IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 20
+    environment:
+      xcode: "27.2"
+    # No triggering or publishing section. Start this workflow manually.
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/ios/deps
+    scripts:
+      - name: Prepare the checkout and build tools
+        script: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          for formula in xcodegen meson ninja pkgconf autoconf automake libtool; do
+            if ! brew list --versions "$formula" >/dev/null; then
+              brew install "$formula"
+            fi
+          done
+      - name: Build and verify the unsigned device IPA
+        script: |
+          /bin/bash scripts/build_unsigned_ipa.sh
+    artifacts:
+      - build/artifacts/WindowsiOS-ez.ipa
+      - build/artifacts/WindowsiOS-ez.entitlements
+      - build/artifacts/SHA256SUMS

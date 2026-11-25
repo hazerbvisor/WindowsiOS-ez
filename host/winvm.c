@@ -2,6 +2,7 @@
 #include "winvm.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <errno.h>
 #include <TargetConditionals.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -19,6 +20,9 @@
 #include "dispatch.h"
 #include "net_slirp.h"
 #include "share.h"
+#if TARGET_OS_IPHONE
+#include "installer_disk.h"
+#endif
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
@@ -27,9 +31,16 @@ static int ncpus = 1;
 static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
+static HvDisk setup_logs = {.fd = -1};
+static pthread_mutex_t disk_checkpoint_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int disk_checkpoint_errno;
+static _Atomic int storage_ready;
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
+#if TARGET_OS_IPHONE
+static char *setup_disk_path;
+#endif
 
 static os_unfair_lock display_lock = OS_UNFAIR_LOCK_INIT;
 static CFTypeRef display_layer;
@@ -162,10 +173,27 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         d0_ptr = &disk0;
     }
     if (c->disk1 && *c->disk1) {
+#if TARGET_OS_IPHONE
+        int installer_status = winios_configure_installer_answer(c->disk1, c->disk0);
+        if (installer_status == -2)
+            return fail(err, errlen, "DISM can only start on its original untouched GPT target. Use the installed disk if provisioning finished, or create a new VM. The existing disk was preserved.");
+        if (installer_status != 0)
+            return fail(err, errlen, "Cannot prepare safe Windows Setup options for this installer disk.");
+#endif
         if (hv_disk_open(&disk1, c->disk1, 0, 1) != 0)
             return fail(err, errlen, "Cannot open secondary/installer disk image.");
         d1_ptr = &disk1;
     }
+
+    HvDisk *logs_ptr = NULL;
+#if TARGET_OS_IPHONE
+    if (d1_ptr && c->setup_logs_disk) {
+        if (winios_prepare_setup_logs(c->setup_logs_disk) ||
+            hv_disk_open(&setup_logs, c->setup_logs_disk, 0, 0))
+            return fail(err, errlen, "Cannot prepare the writable Windows Setup diagnostics disk.");
+        logs_ptr = &setup_logs;
+    }
+#endif
 
     size_t jit = c->jit_bytes ? c->jit_bytes : ((size_t)768 << 20);
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
@@ -184,11 +212,31 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
 
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
-    if (hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                          d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
+    int board_result = hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
+                                         d0_ptr, d1_ptr, logs_ptr, mac, c->enable_sound, c->tpm_state_directory);
+    if (board_result != 0) {
+        int board_errno = errno;
+        hv_winvirt_close_tpm(&board);
+        if (board_result == -2) return fail(err, errlen, "Cannot initialize the VM's TPM 2.0 state.");
+        if (board_result == -3) {
+            if (err && errlen) snprintf(err, errlen, "Guest RAM mmap of %llu MiB failed: %s.",
+                                       (unsigned long long)(ram_bytes >> 20), strerror(board_errno));
+            return -1;
+        }
+        if (board_result == -4) return fail(err, errlen, "Cannot initialize the virtual NVMe disks.");
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
+#if TARGET_OS_IPHONE
+    if (d1_ptr) {
+        setup_disk_path = strdup(c->disk1);
+        if (!setup_disk_path) {
+            hv_winvirt_close_tpm(&board);
+            return fail(err, errlen, "Cannot keep the Windows Setup disk state for guest restart.");
+        }
+    }
+#endif
     hv_winvirt_reset_cpu(&board);
+    atomic_store_explicit(&storage_ready, 1, memory_order_release);
 
     share_on = 0;
     if (c->share_dir && *c->share_dir && c->share_sock && *c->share_sock) {
@@ -261,7 +309,27 @@ static void join_secondaries(void) {
 }
 
 void hv_winvm_flush_disks(void) {
-    if (disk0.fd >= 0) hv_disk_sync(&disk0);
+    pthread_mutex_lock(&disk_checkpoint_lock);
+    int error = 0;
+    if (hv_disk_sync(&disk0) != 0) error = errno;
+    if (hv_disk_sync(&setup_logs) != 0 && !error) error = errno;
+    hv_pflash_sync(board.flash1);
+    atomic_store_explicit(&disk_checkpoint_errno, error, memory_order_relaxed);
+    pthread_mutex_unlock(&disk_checkpoint_lock);
+}
+
+void hv_winvm_storage_diagnostics(char *buffer, size_t capacity) {
+    if (!capacity) return;
+    buffer[0] = '\0';
+    if (!atomic_load_explicit(&storage_ready, memory_order_acquire)) return;
+    int n = snprintf(buffer, capacity, "storage: guest_flush_policy=%d last_host_checkpoint_errno=%d nvram_persist_errno=%d\n",
+                     hv_knob[HV_K_FLUSH], atomic_load_explicit(&disk_checkpoint_errno, memory_order_relaxed),
+                     atomic_load_explicit(&board.flash1->persist_errno, memory_order_relaxed));
+    if (n < 0 || (size_t)n >= capacity) return;
+    size_t used = (size_t)n;
+    used += hv_nvme_diagnostics(board.nvme0, buffer + used, capacity - used);
+    used += hv_nvme_diagnostics(board.nvme1, buffer + used, capacity - used);
+    hv_nvme_diagnostics(board.nvme_logs, buffer + used, capacity - used);
 }
 
 int hv_winvm_run_cpu0(void) {
@@ -273,6 +341,15 @@ int hv_winvm_run_cpu0(void) {
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
+#if TARGET_OS_IPHONE
+            int installer_status = setup_disk_path ? winios_configure_installer_answer(setup_disk_path, NULL) : 0;
+            if (installer_status != 0) {
+                fprintf(stderr, "%s\n", installer_status == -2
+                        ? "winvm: stopping before a DISM provisioning disk can run again"
+                        : "winvm: could not disarm unattended Setup; stopping the VM");
+                return HV_EXIT_HALT;
+            }
+#endif
             /* Reset GIC, ITS, PCIe, and pflash state for warm reboot */
             if (board.gic) {
                 pthread_mutex_lock(&board.gic->mu);
@@ -293,12 +370,19 @@ int hv_winvm_run_cpu0(void) {
             }
             hv_gicv3_its_reset(board.its);
             hv_pcie_reset(board.pcie);
+            hv_nvme_reset(board.nvme0);
+            hv_nvme_reset(board.nvme1);
+            hv_nvme_reset(board.nvme_logs);
             if (board.flash1) {
                 board.flash1->cmd = 0xff;
                 board.flash1->wcycle = 0;
                 board.flash1->status = 0x80;
             }
             if (board.fb) board.fb->active = 0;
+            if (hv_winvirt_reset_tpm(&board) != 0) {
+                fprintf(stderr, "winvm: TPM 2.0 reset failed; stopping the VM\n");
+                return HV_EXIT_HALT;
+            }
             hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;
             spawn_secondaries();
@@ -311,8 +395,18 @@ int hv_winvm_run_cpu0(void) {
 static void *cpu0_thread(void *unused) {
     (void)unused;
     int r = hv_winvm_run_cpu0();
-    atomic_store(&stop_requested, 1);
+    int was_stopping = atomic_exchange(&stop_requested, 1);
     join_secondaries();
+    hv_winvm_flush_disks();
+    hv_winvirt_close_tpm(&board);
+    pthread_mutex_lock(&disk_checkpoint_lock);
+    hv_disk_close(&setup_logs);
+    pthread_mutex_unlock(&disk_checkpoint_lock);
+#if TARGET_OS_IPHONE
+    free(setup_disk_path);
+    setup_disk_path = NULL;
+#endif
+    if (!was_stopping) hv_audio_shutdown();
     if (exit_cb) exit_cb(r);
     return NULL;
 }

@@ -2,6 +2,7 @@
 #define WINVM_PFLASH_H
 
 #include <stdint.h>
+#include <stdatomic.h>
 
 #include "machine.h"
 
@@ -15,6 +16,7 @@ typedef struct HvPflash {
     uint8_t *data;
     int fd;
     int readonly;
+    _Atomic int persist_errno;
     /* CFI01 state machine */
     int cmd;
     int wcycle;
@@ -31,5 +33,6 @@ typedef struct HvPflash {
    writes/erases back to `path`. */
 HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int readonly);
 void hv_pflash_close(HvPflash *f);
+int hv_pflash_sync(HvPflash *f);
 
 #endif

@@ -63,6 +63,16 @@ final class VMViewModel: ObservableObject {
     @Published var isJITLive: Bool = false
     @Published var isDebuggerAttached: Bool = false
     @Published var isVMRunning: Bool = false
+    @Published var needsRelaunchToStart = false
+    @Published private(set) var installationSession: WindowsInstallationMethod?
+
+    var bootActionTitle: String {
+        switch installationSession {
+        case .direct: "START DISM PROVISIONING"
+        case .graphical: "START GRAPHICAL SETUP"
+        case nil: "BOOT WINDOWS 11"
+        }
+    }
     @Published var isUnpacking: Bool = false
     @Published var unpackProgress: Double = 0
     @Published var jitStatusText: String = "Checking JIT..."
@@ -87,10 +97,15 @@ final class VMViewModel: ObservableObject {
     @Published var rightClickArmed: Bool = false
     @Published var systemKeyboardVisible: Bool = false
     @Published var activeSafariURL: IdentifiableURL? = nil
+    @Published var clipboardError: String?
     @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
 
-    private var didAutoLaunchAttempt = false
+    private var bootDirectory: URL?
+    private var bootInstaller: URL?
+    private var bootUsesTPM = false
+    private var bootHardware: VMHardware?
     private var oauthPollTimer: Timer? = nil
+    private var clipboardTask: Task<Void, Never>?
 
     init() {
         let bridge = WinIOSBridge.shared
@@ -225,6 +240,7 @@ final class VMViewModel: ObservableObject {
         isJITLive = b.isJITLive
         isDebuggerAttached = b.isDebuggerAttached
         isVMRunning = b.isVMRunning
+        needsRelaunchToStart = b.needsRelaunchToStart
         isUnpacking = b.isUnpacking
         unpackProgress = b.unpackProgress
         jitStatusText = b.jitStatusText
@@ -240,39 +256,87 @@ final class VMViewModel: ObservableObject {
 
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
-        if !b.isJITLive && b.isDebuggerAttached {
-            _ = b.tryAcquireJIT(true)
+        if let bootHardware, !b.isJITLive && b.isDebuggerAttached {
+            _ = b.tryAcquireJIT(detachAfter: true, jitMiB: UInt64(bootHardware.jitMiB),
+                                ramMiB: UInt64(bootHardware.ramMiB))
         }
         syncFromBridge()
-        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
-            didAutoLaunchAttempt = true
-            b.prepareAndStart(with: nil)
-            syncFromBridge()
-        }
+    }
+
+    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false,
+              method: WindowsInstallationMethod? = nil) {
+        bootDirectory = directory
+        bootInstaller = installer
+        bootUsesTPM = useTPM || installer != nil
+        installationSession = installer == nil ? nil : (method ?? .graphical)
+        bootHardware = hardware
+        startOrRetry()
     }
 
     func startOrRetry() {
-        didAutoLaunchAttempt = true
-        WinIOSBridge.shared.prepareAndStart(with: nil)
+        guard let bootHardware else { return }
+        WinIOSBridge.shared.start(directory: bootDirectory?.path, installer: bootInstaller?.path, useTPM: bootUsesTPM, ramMiB: UInt64(bootHardware.ramMiB),
+                                  jitMiB: UInt64(bootHardware.jitMiB), cpus: Int32(bootHardware.vCPUs))
         syncFromBridge()
     }
 
-    func requestStikDebugJIT() {
-        guard let bundleID = Bundle.main.bundleIdentifier else { return }
-        var urlStr = "stikjit://enable-jit?bundle-id=\(bundleID)&pid=\(getpid())"
-        if let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
-           let script = try? String(contentsOfFile: scriptPath, encoding: .utf8),
-           let data = script.data(using: .utf8) {
-            let b64 = data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-")
-                .replacingOccurrences(of: "/", with: "_")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
-            if let encoded = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                urlStr += "&script-data=\(encoded)"
+    func typeClipboardText(_ text: String) {
+        guard isVMRunning, usbKeyboardReady, clipboardTask == nil else { return }
+        guard text.utf8.count <= 1024, text.utf8.allSatisfy({ (32...126).contains($0) }) else {
+            clipboardError = "Choose a single line of up to 1024 printable ASCII characters. The guest uses its active keyboard layout."
+            return
+        }
+        let keys = text.compactMap(MetalCanvasUIView.asciiToHID)
+        guard keys.count == text.count else {
+            clipboardError = "Some clipboard characters do not have a USB keyboard mapping."
+            return
+        }
+
+        clipboardTask = Task { @MainActor [weak self] in
+            defer { self?.clipboardTask = nil }
+            let bridge = WinIOSBridge.shared
+            for (key, shift) in keys {
+                guard !Task.isCancelled, bridge.isVMRunning else { break }
+                if shift { bridge.sendKeyHid(0xe1, down: true) }
+                bridge.sendKeyHid(key, down: true)
+                try? await Task.sleep(for: .milliseconds(25))
+                bridge.sendKeyHid(key, down: false)
+                if shift { bridge.sendKeyHid(0xe1, down: false) }
+                try? await Task.sleep(for: .milliseconds(25))
             }
         }
-        if let url = URL(string: urlStr) {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+    }
+
+    func cancelClipboardTyping() {
+        clipboardTask?.cancel()
+    }
+
+    func requestStikDebugJIT() {
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let script = Bundle.main.url(forResource: "henge-jit", withExtension: "js"),
+              let data = try? Data(contentsOf: script) else {
+            jitStatusText = "The bundled JIT debugger script could not be loaded."
+            return
+        }
+        let scriptData = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        var components = URLComponents()
+        components.scheme = "stikjit"
+        components.host = "enable-jit"
+        components.queryItems = [
+            URLQueryItem(name: "bundle-id", value: bundleID),
+            URLQueryItem(name: "pid", value: String(getpid())),
+            URLQueryItem(name: "script-data", value: scriptData),
+        ]
+        guard let url = components.url else { return }
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            if !opened {
+                Task { @MainActor [weak self] in
+                    self?.jitStatusText = "StikDebug did not open. Install and pair the authorized debugger, then try again."
+                }
+            }
         }
     }
 }

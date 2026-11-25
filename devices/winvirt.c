@@ -17,10 +17,13 @@
 
 #include "mmu.h"
 #include "timer.h"
+#ifdef WINIOS_DEVICE_TPM
+#include "tpm_device.h"
+#endif
 
 extern kern_return_t mach_memory_entry_ownership(mach_port_t entry, task_t owner, int ledger_tag, int ledger_flags);
 
-uint8_t *hv_alloc_no_footprint(uint64_t size) {
+uint8_t *hv_alloc_no_footprint_report(uint64_t size, char *error, size_t capacity) {
     enum {
         CHUNK = 128u << 20,
         MAP_MEM_LEDGER_TAGGED_ = 0x002000,
@@ -29,7 +32,11 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
         LEDGER_NO_FOOTPRINT = 1,
     };
     vm_address_t base = 0;
-    if (vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NULL;
+    kern_return_t reserve = vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE);
+    if (reserve != KERN_SUCCESS) {
+        if (error) snprintf(error, capacity, "vm_allocate: %d (%s).", reserve, mach_error_string(reserve));
+        return NULL;
+    }
     for (uint64_t off = 0; off < size; off += CHUNK) {
         uint64_t len = size - off < CHUNK ? size - off : CHUNK;
         memory_object_size_t got = len;
@@ -38,15 +45,21 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
             mach_task_self(), &got, 0,
             MAP_MEM_NAMED_CREATE_ | MAP_MEM_LEDGER_TAGGED_ | VM_PROT_READ | VM_PROT_WRITE,
             &entry, MACH_PORT_NULL);
-        if (kr == KERN_SUCCESS)
-            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
+        const char *stage = "mach_make_memory_entry_64";
         if (kr == KERN_SUCCESS) {
+            stage = "mach_memory_entry_ownership";
+            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
+        }
+        if (kr == KERN_SUCCESS) {
+            stage = "vm_map";
             vm_address_t to = base + off;
             kr = vm_map(mach_task_self(), &to, len, 0, VM_FLAGS_OVERWRITE, entry, 0, FALSE,
                         VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
         }
         if (entry != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), entry);
         if (kr != KERN_SUCCESS) {
+            if (error) snprintf(error, capacity, "%s at +%llu MiB: %d (%s); reservation released.",
+                                stage, (unsigned long long)(off >> 20), kr, mach_error_string(kr));
             fprintf(stderr, "winvm: guest RAM outside footprint refused (%s), falling back\n", mach_error_string(kr));
             vm_deallocate(mach_task_self(), base, size);
             return NULL;
@@ -55,6 +68,10 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
     fprintf(stderr, "winvm: guest RAM (%llu MB) allocated outside Jetsam footprint\n",
             (unsigned long long)(size >> 20));
     return (uint8_t *)base;
+}
+
+uint8_t *hv_alloc_no_footprint(uint64_t size) {
+    return hv_alloc_no_footprint_report(size, NULL, 0);
 }
 
 struct PrefaultArgs {
@@ -117,7 +134,8 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound) {
+                      HvDisk *disk0, HvDisk *disk1, HvDisk *setup_logs, const uint8_t mac[6], int enable_sound,
+                      const char *tpm_state_directory) {
     memset(b, 0, sizeof *b);
     b->m = m;
     b->cpu = cpu;
@@ -152,10 +170,22 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     }
     if (b->ram == MAP_FAILED)
         b->ram = mmap(NULL, ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (b->ram == MAP_FAILED) return -1;
+    if (b->ram == MAP_FAILED) return -3;
 
     /* 2. Build Flattened Device Tree (placed at 0x40000000 on every reset) */
-    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, &b->dtb_size);
+    uint32_t tpm_address = 0;
+    if (tpm_state_directory && *tpm_state_directory) {
+#ifdef WINIOS_DEVICE_TPM
+        b->tpm = winios_tpm_open(tpm_state_directory);
+        if (!b->tpm) return -2;
+        tpm_address = WINVIRT_TPM_PA;
+        hv_machine_add_mmio(m, tpm_address, WINIOS_TPM_MMIO_SIZE, b->tpm,
+                            winios_tpm_read, winios_tpm_write, "tpm2-fifo");
+#else
+        return -2;
+#endif
+    }
+    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, tpm_address, &b->dtb_size);
     if (!b->dtb || b->dtb_size > ram_size) return -1;
 
     /* 3. Flash banks: pflash0 (64 MB read-only UEFI code HvRam) & pflash1 (64 MB persistent CFI01 NVRAM) */
@@ -186,15 +216,16 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
 
     b->fw_cfg = hv_fw_cfg_create(m, WINVIRT_FW_CFG_PA, (uint16_t)ncpus);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
-    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
+    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0, tpm_address);
 
     /* 7. PCIe Root Complex (GPEX):
      *    Slot 0: Host Bridge (1b36:0008)
      *    Slot 1: VirtIO-Net  (1af4:1000)
      *    Slot 2: NVMe 0      (1b36:0010, serial WIN11IOS01 -> matches UEFI Boot0001!)
      *    Slot 3: xHCI USB 3  (1b36:000d, Port 1 Keyboard + Port 2 Absolute Tablet)
-     *    Slot 4: NVMe 1      (optional installer/secondary image)
-     *    Slot 5: VirtIO-Snd  (optional audio) */
+     *    Slot 4: HDA
+     *    Slot 5: NVMe 1      (optional installer/secondary image)
+     *    Slot 6: NVMe logs   (optional writable installer diagnostics) */
     b->pcie = hv_pcie_create(m, b->gic, WINVIRT_PCIE_ECAM_PA, WINVIRT_PCIE_ECAM_SZ,
                              WINVIRT_PCIE_MMIO_PA, WINVIRT_PCIE_MMIO_SZ, WINVIRT_INTID_PCIE);
     hv_pcie_add_pio(b->pcie, WINVIRT_PCIE_PIO_PA, WINVIRT_PCIE_PIO_SZ);
@@ -208,6 +239,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->usb = hv_xhci_create(m, b->pcie);
     b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
+    if (setup_logs) b->nvme_logs = hv_nvme_create(m, b->pcie, setup_logs, "WINIOSLOG");
+    if ((disk0 && !b->nvme0) || (disk1 && !b->nvme1) || (setup_logs && !b->nvme_logs))
+        return -4;
     (void)enable_sound;
 
     m->tick = tick;
@@ -235,4 +269,20 @@ void hv_winvirt_power_button(HvWinVirt *b) {
     if (!b || !b->gic) return;
     __atomic_fetch_or(&b->ged_events, 0x2U, __ATOMIC_ACQ_REL);
     hv_gicv3_pend(b->gic, WINVIRT_INTID_GED);
+}
+
+int hv_winvirt_reset_tpm(HvWinVirt *b) {
+#ifdef WINIOS_DEVICE_TPM
+    if (b->tpm) return winios_tpm_reset(b->tpm);
+#else
+    (void)b;
+#endif
+    return 0;
+}
+
+void hv_winvirt_close_tpm(HvWinVirt *b) {
+#ifdef WINIOS_DEVICE_TPM
+    if (b->tpm) winios_tpm_close(b->tpm);
+#endif
+    b->tpm = NULL;
 }

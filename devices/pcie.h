@@ -75,7 +75,8 @@ void hv_pci_add_pm_cap(HvPciDev *d, uint8_t at);
 void hv_pci_add_pcie_cap(HvPciDev *d, uint8_t at);
 void hv_pci_add_msix(HvPciDev *d, uint8_t at, int bar, uint32_t table_off, uint32_t pba_off, uint16_t nvec);
 int hv_pci_msix_enabled(const HvPciDev *d);
-void hv_pci_msix_notify(HvPciDev *d, uint16_t vec);
+enum { HV_PCI_MSI_UNROUTED, HV_PCI_MSI_DEFERRED, HV_PCI_MSI_ROUTED };
+int hv_pci_msix_notify(HvPciDev *d, uint16_t vec);
 
 int hv_pcie_attach(HvPcie *p, HvPciDev *d); /* returns the slot, or -1 */
 uint64_t hv_pci_bar_addr(HvPciDev *d, int bar);

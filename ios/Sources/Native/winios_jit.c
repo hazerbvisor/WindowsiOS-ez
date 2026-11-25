@@ -16,9 +16,11 @@
 #include <mach/vm_map.h>
 #include <os/log.h>
 #include <os/proc.h>
+#include <os/lock.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -68,13 +70,16 @@ extern uint64_t winios_brk_probe(void);
         fflush(stderr);                                                   \
     } while (0)
 
-/* Executable JIT pages above 0x7000000000 hang on iOS 26/27 TXM devices.
- * Reserve a 512 MiB zero-fill block in __DATA at launch so it sits inside the
- * low < 0x180000000 window, then deallocate it immediately before debugserver's
- * `_M<size>,rx` allocation takes the first-fit hole. */
-#define WINIOS_JIT_LOW_LIMIT 0x7000000000ull
+/* Reserve the largest supported RX mapping at image load, as Henge does.
+ * This is zero-fill virtual space. Leave the extra page mapped on release. */
+#ifndef WINIOS_JIT_HOLD_BYTES
+#define WINIOS_JIT_HOLD_BYTES WINIOS_JIT_EXPERIMENTAL_MAX_BYTES
+#endif
+_Static_assert(WINIOS_JIT_HOLD_BYTES >= WINIOS_JIT_DEFAULT_BYTES &&
+               WINIOS_JIT_HOLD_BYTES <= WINIOS_JIT_EXPERIMENTAL_MAX_BYTES &&
+               WINIOS_JIT_HOLD_BYTES % 16384 == 0, "invalid low JIT reservation");
 __attribute__((used, aligned(16384)))
-static uint8_t g_jit_reserve[WINIOS_JIT_DEFAULT_BYTES + (16u << 10)];
+static uint8_t g_jit_reserve[WINIOS_JIT_HOLD_BYTES + (16u << 10)];
 static bool g_jit_reserve_released;
 
 static _Thread_local bool g_expecting_jit_trap;
@@ -85,36 +90,65 @@ static WinIosDualMapping g_mapping;
 static void *g_guest_ram;
 static uint64_t g_guest_ram_bytes;
 static atomic_bool g_jit_live;
-static char g_status[256] = "Not initialized";
+static os_unfair_lock g_status_lock = OS_UNFAIR_LOCK_INIT;
+static char g_status[256] = "Choose a virtual machine before allocating JIT.";
+static char g_ram_status[320] = "Guest RAM not requested.";
 
-static void prealloc_ledger_exempt_ram(void) {
-    if (g_guest_ram) return;
+static void set_ram_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void set_ram_status(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    os_unfair_lock_lock(&g_status_lock);
+    vsnprintf(g_ram_status, sizeof g_ram_status, fmt, ap);
+    os_unfair_lock_unlock(&g_status_lock);
+    va_end(ap);
+}
+
+static void prealloc_ledger_exempt_ram(uint64_t requested_mib) {
+    if (g_guest_ram && (!requested_mib || requested_mib <= (g_guest_ram_bytes >> 20))) {
+        set_ram_status("Requested %llu MiB; existing ledger reservation %llu MiB.",
+                       (unsigned long long)requested_mib, (unsigned long long)(g_guest_ram_bytes >> 20));
+        return;
+    }
     uint64_t phys_mem = 0;
     size_t len = sizeof phys_mem;
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
     uint64_t phys_mb = phys_mem >> 20;
-    /* Size Guest RAM to fit comfortably within iOS 36-bit user VA ceiling alongside TXM JIT RX/RW + JIT tables */
-    static const uint64_t candidates_mb[] = {4608, 4096, 3584, 3072, 2560, 2048};
-    for (size_t i = 0; i < sizeof(candidates_mb) / sizeof(candidates_mb[0]); i++) {
-        uint64_t mb = candidates_mb[i];
-        if (phys_mb > 0 && mb + 2560 > phys_mb) continue;
-        uint8_t *p = hv_alloc_no_footprint(mb << 20);
+    static const uint64_t candidates_mib[] = {4608, 4096, 3584, 3072, 2560, 2048};
+    const uint64_t *candidates = requested_mib ? &requested_mib : candidates_mib;
+    size_t count = requested_mib ? 1 : sizeof(candidates_mib) / sizeof(candidates_mib[0]);
+    char failure[192];
+    snprintf(failure, sizeof failure, "No candidate fits physical memory (%llu MiB) with launch headroom.",
+             (unsigned long long)phys_mb);
+    for (size_t i = 0; i < count; i++) {
+        uint64_t mb = candidates[i];
+        if (requested_mib) {
+            if (!winios_guest_ram_fits(mb, phys_mb)) continue;
+        } else if (phys_mb > 0 && mb + 2560 > phys_mb) continue;
+        uint8_t *p = hv_alloc_no_footprint_report(mb << 20, failure, sizeof failure);
         if (p) {
+            if (g_guest_ram) vm_deallocate(mach_task_self(), (vm_address_t)g_guest_ram, g_guest_ram_bytes);
             g_guest_ram = p;
             g_guest_ram_bytes = mb << 20;
+            set_ram_status("Requested %llu MiB; reserved %llu MiB of ledger-exempt virtual RAM.",
+                           (unsigned long long)requested_mib, (unsigned long long)mb);
             WINIOS_LOG("pre-allocated %llu MiB ledger-exempt Guest RAM at %p",
                        (unsigned long long)mb, (void *)p);
             return;
         }
     }
-    WINIOS_LOG("ledger-exempt Guest RAM pre-allocation unavailable; will fall back at VM start");
+    set_ram_status("Requested %llu MiB; reserved %llu MiB. %s",
+                   (unsigned long long)requested_mib, (unsigned long long)(g_guest_ram_bytes >> 20), failure);
+    WINIOS_LOG("%s", g_ram_status);
 }
 
 static void set_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void set_status(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+    os_unfair_lock_lock(&g_status_lock);
     vsnprintf(g_status, sizeof g_status, fmt, ap);
+    os_unfair_lock_unlock(&g_status_lock);
     va_end(ap);
 }
 
@@ -160,13 +194,19 @@ size_t winios_available_memory_bytes(void) {
 #endif
 }
 
-static void release_low_hold(size_t bytes) {
-    if (g_jit_reserve_released || bytes > WINIOS_JIT_DEFAULT_BYTES) return;
-    vm_address_t start = ((vm_address_t)g_jit_reserve + 16383) & ~(vm_address_t)16383;
-    kern_return_t kr = vm_deallocate(mach_task_self(), start, WINIOS_JIT_DEFAULT_BYTES);
-    WINIOS_LOG("released low __DATA hold at %#lx (%zu MiB): %s",
-               (unsigned long)start, WINIOS_JIT_DEFAULT_BYTES >> 20, mach_error_string(kr));
-    g_jit_reserve_released = true;
+static kern_return_t release_low_hold(void) {
+    if (g_jit_reserve_released) return KERN_SUCCESS;
+    vm_address_t start = (vm_address_t)g_jit_reserve;
+    if (!winios_jit_rx_fits(start, WINIOS_JIT_HOLD_BYTES)) {
+        WINIOS_LOG("low hold %#lx (%zu MiB) is outside the TXM window",
+                   (unsigned long)start, WINIOS_JIT_HOLD_BYTES >> 20);
+        return KERN_INVALID_ADDRESS;
+    }
+    kern_return_t kr = vm_deallocate(mach_task_self(), start, WINIOS_JIT_HOLD_BYTES);
+    WINIOS_LOG("release low hold %#lx (%zu MiB): %d (%s)",
+               (unsigned long)start, WINIOS_JIT_HOLD_BYTES >> 20, kr, mach_error_string(kr));
+    g_jit_reserve_released = kr == KERN_SUCCESS;
+    return kr;
 }
 
 static bool jit_selftest(const WinIosDualMapping *m) {
@@ -198,13 +238,36 @@ static bool jit_selftest(const WinIosDualMapping *m) {
     return true;
 }
 
-bool winios_jit_acquire(size_t bytes, bool detach_after) {
-    if (atomic_load(&g_jit_live)) return true;
-    if (bytes == 0) bytes = WINIOS_JIT_DEFAULT_BYTES;
+bool winios_jit_acquire(size_t bytes, uint64_t requested_ram_mib, bool detach_after) {
+    if (bytes < (1u << 20) || bytes > WINIOS_JIT_EXPERIMENTAL_MAX_BYTES) {
+        set_status("JIT cache request exceeds the implemented range (1–1536 MiB).");
+        return false;
+    }
     bytes = (bytes + 0x3fffu) & ~(size_t)0x3fffu;
+    if (atomic_load(&g_jit_live)) {
+        if (bytes > g_mapping.size) {
+            set_status("Requested %zu MiB JIT; %zu MiB already mapped. Quit and select this machine before enabling JIT.",
+                       bytes >> 20, g_mapping.size >> 20);
+            return false;
+        }
+        if (requested_ram_mib > (g_guest_ram_bytes >> 20) && winios_jit_is_debugger_attached())
+            prealloc_ledger_exempt_ram(requested_ram_mib);
+        return true;
+    }
+    if (bytes > WINIOS_JIT_HOLD_BYTES) {
+        set_status("Requested %zu MiB JIT; this build reserves %zu MiB at low addresses.",
+                   bytes >> 20, WINIOS_JIT_HOLD_BYTES >> 20);
+        return false;
+    }
+    if (bytes > WINIOS_JIT_DEFAULT_BYTES) {
+        if (!__builtin_available(iOS 26.0, *)) {
+            set_status("Experimental JIT cache sizes require iOS or iPadOS 26 or later.");
+            return false;
+        }
+    }
 
     if (!winios_jit_is_debugger_attached()) {
-        set_status("Waiting for debugger (StikDebug or LLDB)");
+        set_status("Requested %zu MiB JIT; mapped 0 MiB. Waiting for authorized debugger.", bytes >> 20);
         WINIOS_LOG("acquire: CS_DEBUGGED not set yet");
         return false;
     }
@@ -216,13 +279,14 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
     if (probe == 0) {
         /* Pre-iOS 26 fallback where CS_DEBUGGED permits plain vm_remap RX/RW without trap servicing */
         if (!__builtin_available(iOS 26.0, *)) {
-            release_low_hold(bytes);
+            release_low_hold();
             uint8_t *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
             if (rx != MAP_FAILED) {
                 vm_address_t rw = 0;
                 vm_prot_t cur, max;
-                if (vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                             (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS &&
+                kern_return_t remap = vm_remap(mach_task_self(), &rw, bytes, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                               (vm_address_t)rx, FALSE, &cur, &max, VM_INHERIT_NONE);
+                if (remap == KERN_SUCCESS &&
                     vm_protect(mach_task_self(), (vm_address_t)rx, bytes, FALSE,
                                VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS &&
                     vm_protect(mach_task_self(), rw, bytes, FALSE,
@@ -235,34 +299,47 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
                         return true;
                     }
                 }
+                if (remap == KERN_SUCCESS) vm_deallocate(mach_task_self(), rw, bytes);
                 munmap(rx, bytes);
             }
         }
-        set_status("Debugger attached, waiting for brk trap handler");
+        set_status("Requested %zu MiB JIT; mapped 0 MiB. The debugger probe went unanswered.", bytes >> 20);
         WINIOS_LOG("probe returned 0 (debugger did not answer brk #0x69)");
         return false;
     }
 
     WINIOS_LOG("probe answered: 0x%llx", (unsigned long long)probe);
-    release_low_hold(bytes);
+    kern_return_t hold_result = release_low_hold();
 
     void *rx = NULL;
+    const char *request_failure = "No RX address returned";
     for (int attempt = 1; attempt <= 3; attempt++) {
         g_expecting_jit_trap = true;
         rx = winios_brk_get_jit_mapping(NULL, bytes);
         g_expecting_jit_trap = false;
-        if (rx != NULL) break;
-        usleep(50 * 1000);
+        /* The bundled debugger script returns these small values for failures.
+         * External debuggers can still return zero or an actual address. */
+        switch ((uintptr_t)rx) {
+        case 1: request_failure = "Debugger rejected the RX allocation request"; break;
+        case 2: request_failure = "Debugger refused to prepare the RX pages"; break;
+        case 3: request_failure = "Debugger returned an RX range outside the TXM window"; break;
+        default: break;
+        }
+        if ((uintptr_t)rx > 3) break;
+        rx = NULL;
+        if (attempt < 3) usleep(50 * 1000);
     }
 
     if (!rx) {
-        set_status("Failed: debugger returned NULL RX region");
+        set_status("Requested %zu MiB RX; mapped 0 MiB. %s after 3 attempts. Release of %zu MiB low hold: %d (%s).",
+                   bytes >> 20, request_failure, WINIOS_JIT_HOLD_BYTES >> 20, hold_result, mach_error_string(hold_result));
         return false;
     }
-    if ((uint64_t)(uintptr_t)rx + bytes > WINIOS_JIT_LOW_LIMIT) {
-        WINIOS_LOG("RX region %p above %#llx limit; releasing", rx, WINIOS_JIT_LOW_LIMIT);
+    if (!winios_jit_rx_fits((uintptr_t)rx, bytes)) {
+        WINIOS_LOG("RX region %p above %#llx limit; releasing", rx, (unsigned long long)WINIOS_JIT_LOW_LIMIT);
         vm_deallocate(mach_task_self(), (vm_address_t)rx, bytes);
-        set_status("Failed: RX allocated above low limit (relaunch app)");
+        set_status("Requested %zu MiB RX; kept 0 MiB. Debugger returned %p outside the TXM window (end limit %#llx).",
+                   bytes >> 20, rx, (unsigned long long)WINIOS_JIT_LOW_LIMIT);
         return false;
     }
 
@@ -286,14 +363,14 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
                       mach_task_self(), (vm_address_t)rx, FALSE, &cur_prot, &max_prot, VM_INHERIT_NONE);
     }
     if (kr != KERN_SUCCESS) {
-        set_status("Failed: vm_remap (%s)", mach_error_string(kr));
+        set_status("Requested %zu MiB JIT; kept 0 MiB. RW alias vm_remap failed: %d (%s).", bytes >> 20, kr, mach_error_string(kr));
         vm_deallocate(mach_task_self(), (vm_address_t)rx, bytes);
         return false;
     }
 
     kr = vm_protect(mach_task_self(), rw, (vm_size_t)bytes, FALSE, VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
-        set_status("Failed: vm_protect RW (%s)", mach_error_string(kr));
+        set_status("Requested %zu MiB JIT; kept 0 MiB. RW alias vm_protect failed: %d (%s).", bytes >> 20, kr, mach_error_string(kr));
         vm_deallocate(mach_task_self(), rw, bytes);
         vm_deallocate(mach_task_self(), (vm_address_t)rx, bytes);
         return false;
@@ -301,14 +378,14 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
 
     WinIosDualMapping m = {(uint8_t *)rw, (uint8_t *)rx, bytes};
     if (!jit_selftest(&m)) {
-        set_status("Failed: TXM selftest rejected RX execution");
+        set_status("Requested %zu MiB JIT; kept 0 MiB. TXM executable self-test rejected the mapping.", bytes >> 20);
         vm_deallocate(mach_task_self(), rw, bytes);
         vm_deallocate(mach_task_self(), (vm_address_t)rx, bytes);
         return false;
     }
 
     g_mapping = m;
-    prealloc_ledger_exempt_ram();
+    prealloc_ledger_exempt_ram(requested_ram_mib);
     atomic_store(&g_jit_live, true);
 
     if (detach_after) {
@@ -330,6 +407,7 @@ bool winios_jit_is_live(void) {
 }
 
 WinIosDualMapping winios_jit_mapping(void) {
+    if (!atomic_load(&g_jit_live)) return (WinIosDualMapping){0};
     return g_mapping;
 }
 
@@ -339,5 +417,17 @@ void *winios_jit_guest_ram(uint64_t *out_bytes) {
 }
 
 const char *winios_jit_status_text(void) {
-    return g_status;
+    static _Thread_local char snapshot[sizeof g_status];
+    os_unfair_lock_lock(&g_status_lock);
+    memcpy(snapshot, g_status, sizeof snapshot);
+    os_unfair_lock_unlock(&g_status_lock);
+    return snapshot;
+}
+
+const char *winios_jit_ram_status_text(void) {
+    static _Thread_local char snapshot[sizeof g_ram_status];
+    os_unfair_lock_lock(&g_status_lock);
+    memcpy(snapshot, g_ram_status, sizeof snapshot);
+    os_unfair_lock_unlock(&g_status_lock);
+    return snapshot;
 }

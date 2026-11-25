@@ -14,6 +14,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) BOOL isJITLive;
 @property (nonatomic, readonly) BOOL isDebuggerAttached;
 @property (nonatomic, readonly) BOOL isVMRunning;
+@property (nonatomic, readonly) BOOL needsRelaunchToStart;
 @property (nonatomic, readonly) BOOL isUnpacking;
 @property (nonatomic, readonly) double unpackProgress;
 @property (nonatomic, readonly) NSString *jitStatusText;
@@ -22,6 +23,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) uint32_t framebufferHeight;
 @property (nonatomic, readonly) uint64_t presentedFrames;
 @property (nonatomic, readonly) uint64_t availableMemoryMB;
+@property (nonatomic, readonly) uint64_t maximumJITMiB;
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
@@ -32,11 +34,18 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)takeGuestOAuthDone;
 
 - (void)installTrapGuard;
-- (BOOL)tryAcquireJIT:(BOOL)detachAfter;
+- (BOOL)tryAcquireJIT:(BOOL)detachAfter
+                jitMiB:(uint64_t)jitMiB
+                ramMiB:(uint64_t)ramMiB NS_SWIFT_NAME(tryAcquireJIT(detachAfter:jitMiB:ramMiB:));
 
 - (BOOL)hasProvisionedMachine;
 - (BOOL)needsSparseUnpack;
-- (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer;
+- (void)prepareAndStartInDirectory:(nullable NSString *)directory
+                         installer:(nullable NSString *)installer
+                             useTPM:(BOOL)useTPM
+                            ramMiB:(uint64_t)ramMiB
+                            jitMiB:(uint64_t)jitMiB
+                              cpus:(int)cpus NS_SWIFT_NAME(start(directory:installer:useTPM:ramMiB:jitMiB:cpus:));
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
@@ -52,6 +61,7 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)sendEscape;
 - (void)pressPowerButton;
 - (void)flushDisks;
+- (void)captureDiagnostics;
 - (void)stopVM;
 
 @end

@@ -1,5 +1,6 @@
 #include "pflash.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,10 +20,20 @@ enum {
     CFI_LOCK_SETUP  = 0x60,
 };
 
-static void persist(HvPflash *f, uint64_t off, uint64_t len) {
-    if (f->fd < 0 || f->readonly || !len) return;
+static uint8_t persist(HvPflash *f, uint64_t off, uint64_t len, uint8_t error_bit) {
     if (off + len > f->size) len = f->size - off;
-    (void)pwrite(f->fd, f->data + off, (size_t)len, (off_t)off);
+    while (len) {
+        ssize_t n = pwrite(f->fd, f->data + off, (size_t)len, (off_t)off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            int failure = n < 0 ? errno : EIO;
+            atomic_store_explicit(&f->persist_errno, failure, memory_order_relaxed);
+            return 0x80 | error_bit;
+        }
+        off += (uint64_t)n;
+        len -= (uint64_t)n;
+    }
+    return 0x80;
 }
 
 static uint64_t pflash_read(void *opaque, uint64_t off, unsigned size) {
@@ -67,8 +78,7 @@ static void pflash_write(void *opaque, uint64_t off, uint64_t val, unsigned size
             unsigned n = off + size <= f->size ? size : (unsigned)(f->size - off);
             for (unsigned i = 0; i < n; i++)
                 f->data[off + i] &= (uint8_t)(val >> (i * 8));
-            persist(f, off, n);
-            f->status = 0x80;
+            f->status = persist(f, off, n, 0x10);
             f->cmd = CFI_READ_STATUS;
             f->wcycle = 0;
             return;
@@ -91,8 +101,7 @@ static void pflash_write(void *opaque, uint64_t off, uint64_t val, unsigned size
             }
             /* wcycle == 3: confirm 0xd0 */
             uint64_t sec = off & ~((uint64_t)HV_PFLASH_SECTOR - 1);
-            persist(f, sec, HV_PFLASH_SECTOR);
-            f->status = 0x80;
+            f->status = persist(f, sec, HV_PFLASH_SECTOR, 0x10);
             f->cmd = CFI_READ_STATUS;
             f->wcycle = 0;
             return;
@@ -101,8 +110,7 @@ static void pflash_write(void *opaque, uint64_t off, uint64_t val, unsigned size
             if (c == 0xd0) {
                 uint64_t sec = off & ~((uint64_t)HV_PFLASH_SECTOR - 1);
                 memset(f->data + sec, 0xff, HV_PFLASH_SECTOR);
-                persist(f, sec, HV_PFLASH_SECTOR);
-                f->status = 0x80;
+                f->status = persist(f, sec, HV_PFLASH_SECTOR, 0x20);
                 f->cmd = CFI_READ_STATUS;
             } else {
                 f->cmd = CFI_READ_ARRAY;
@@ -209,7 +217,6 @@ static void init_cfi_table(HvPflash *f) {
 HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int readonly) {
     int flags = readonly ? O_RDONLY : O_RDWR;
     int fd = open(path, flags);
-    if (fd < 0 && !readonly) fd = open(path, O_RDONLY), readonly = 1;
     if (fd < 0) return NULL;
 
     struct stat st;
@@ -219,6 +226,7 @@ HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int read
     }
 
     HvPflash *f = calloc(1, sizeof *f);
+    if (!f) { close(fd); return NULL; }
     f->m = m;
     f->pa = pa;
     f->size = HV_PFLASH_SIZE;
@@ -226,6 +234,7 @@ HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int read
     f->readonly = readonly;
     f->cmd = CFI_READ_ARRAY;
     f->status = 0x80;
+    atomic_init(&f->persist_errno, 0);
 
     void *buf = mmap(NULL, (size_t)f->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (buf == MAP_FAILED) {
@@ -240,7 +249,11 @@ HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int read
     size_t got = 0;
     while (got < to_read) {
         ssize_t n = pread(fd, f->data + got, to_read - got, (off_t)got);
-        if (n <= 0) break;
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            hv_pflash_close(f);
+            return NULL;
+        }
         got += (size_t)n;
     }
 
@@ -256,10 +269,18 @@ HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int read
     return f;
 }
 
+int hv_pflash_sync(HvPflash *f) {
+    if (!f || f->fd < 0) return 0;
+    int result;
+    do { result = fsync(f->fd); } while (result == -1 && errno == EINTR);
+    if (result < 0) atomic_store_explicit(&f->persist_errno, errno, memory_order_relaxed);
+    return result;
+}
+
 void hv_pflash_close(HvPflash *f) {
     if (!f) return;
     if (f->fd >= 0) {
-        fsync(f->fd);
+        hv_pflash_sync(f);
         close(f->fd);
         f->fd = -1;
     }

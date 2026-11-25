@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Launch WindowsiOS (`me.ammaar.windowsios`) on Ammaar's physical iPhone Duo
-(`00008160-000E05D036C0000A`), service the iOS 26/27 TXM BreakpointJIT traps
+Launch WindowsiOS on a paired physical iOS device and service the iOS 26/27 TXM BreakpointJIT traps
 (`brk #0x69` probe, `brk #0xf00d` RX allocation + 16 KiB page blessing + clean detach),
 and let Windows 11 ARM64 run natively at full speed with zero debugger attached.
 """
@@ -24,8 +23,7 @@ import lldb  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "work"
-DEFAULT_UDID = "00008160-000E05D036C0000A"
-DEFAULT_BUNDLE_ID = "me.ammaar.windowsios"
+DEFAULT_BUNDLE_ID = "io.github.hazerbvisor.windowsios-ez"
 
 
 def run_cmd(debugger, cmd: str) -> str:
@@ -80,7 +78,7 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default=DEFAULT_UDID)
+    ap.add_argument("--device", required=True)
     ap.add_argument("--bundle-id", default=DEFAULT_BUNDLE_ID)
     args = ap.parse_args()
 
@@ -111,7 +109,7 @@ def main():
     pid = info["result"]["process"]["processIdentifier"]
     core_device_id = (
         info.get("result", {}).get("device", {}).get("identifier")
-        or "FB6341E2-5109-505C-9A11-CFF7BE9973C3"
+        or args.device
     )
     print(f"[duo] Launched stopped PID = {pid} on CoreDevice {core_device_id}; attaching LLDB...", flush=True)
 

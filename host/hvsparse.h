@@ -8,11 +8,19 @@
      "HVSPARSE" magic, u64 logical size, then records {u64 offset, u64 length, data}
      until a record with length 0. Little-endian. */
 
-/* Pack src (a sparse raw image) into dst. Returns 0 or -1. */
+/* Pack src (a sparse raw image) into a new dst. Returns 0 or -1. */
 int hv_sparse_pack(const char *src, const char *dst);
 /* The same; progress(position, size, opaque) may be NULL. */
 int hv_sparse_pack_progress(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
 /* Both: unpack into a sparse file. progress(done, total, opaque) may be NULL. Returns 0 or -1. */
-int hv_sparse_unpack(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
+int hv_sparse_unpack(const char *src, const char *dst, uint64_t minimum_size, void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
+
+/* Duplicate a raw image into a new sparse file. */
+int hv_sparse_copy_raw(const char *src, const char *dst);
+int hv_sparse_copy_raw_progress(const char *src, const char *dst,
+                                void (*progress)(uint64_t done, uint64_t total, void *opaque), void *opaque);
+
+/* Check the archive structure without writing or allocating a disk. */
+int hv_sparse_validate(const char *src, uint64_t minimum_size);
 
 #endif

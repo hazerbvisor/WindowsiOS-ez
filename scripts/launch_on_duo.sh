@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-UDID="${1:-00008160-000E05D036C0000A}"
-BUNDLE_ID="${2:-me.ammaar.windowsios}"
+UDID="${1:?Usage: launch_on_duo.sh DEVICE_UDID [SIGNED_BUNDLE_ID]}"
+BUNDLE_ID="${2:-io.github.hazerbvisor.windowsios-ez}"
 LAUNCH_JSON="$ROOT/work/duo_launch.json"
 
 mkdir -p "$ROOT/work"
@@ -30,13 +30,16 @@ for attempt in 1 2 3 4 5; do
     sleep 2
 done
 
-read -r PID CORE_ID < <(/opt/homebrew/bin/python3 -c "
+read -r PID CORE_ID < <(python3 - "$LAUNCH_JSON" "$UDID" <<'PYCODE'
 import json
-d = json.load(open('$LAUNCH_JSON'))
+import sys
+with open(sys.argv[1]) as launch_file:
+    d = json.load(launch_file)
 pid = d['result']['process']['processIdentifier']
-cid = d.get('result', {}).get('device', {}).get('identifier') or 'FB6341E2-5109-505C-9A11-CFF7BE9973C3'
+cid = d.get('result', {}).get('device', {}).get('identifier') or sys.argv[2]
 print(pid, cid)
-")
+PYCODE
+)
 
 echo "[duo] Attaching LLDB to PID=$PID on CoreDevice=$CORE_ID..."
 sleep 1

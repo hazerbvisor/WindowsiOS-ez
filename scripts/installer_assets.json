@@ -1,0 +1,11 @@
+{
+  "edk2-aarch64-code.fd": "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d",
+  "edk2-arm-vars.fd": "b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f",
+  "EDK2-Licenses.txt": "1ddeaed2e7d2e9ecb960bdfc1b8ee45387aff70d056d985d145949af3951657c",
+  "NetKVM/netkvm.cat": "7185ae6c8c6d31d047c77b167e740b7fe3aa676a89b853783cdc47fd889d51c5",
+  "NetKVM/netkvm.inf": "1aaf16af51ef4697503e7c261f318a9414dc726be5250f09cc64d558f46138fc",
+  "NetKVM/netkvm.sys": "211340b8128145bae8890a4fab27b625c23e032ca65be984b524e1b0d4b54f0f",
+  "NetKVM/netkvmp.exe": "98b239dc9e4080cc21211582f05ab1d7f6ac74d867980b183c3f8f5ae9d5dc5a",
+  "NetKVM-LICENSE.txt": "d273928669ce17640239b49622ddb765669e93f4dace263cbfe3d463c339eb44",
+  "NetKVM-ProtocolService-LICENSE.txt": "3abe04cd6ef4160dfe1b073be1cc65402677cb3d3773733027d242cd24ae4df8"
+}

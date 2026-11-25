@@ -23,6 +23,10 @@ typedef struct HvJitRegion {
     int owned;          /* mapped here (closed here) rather than handed in */
 } HvJitRegion;
 
+static inline void *hv_jit_writable_address(const HvJitRegion *region, const void *rx) {
+    return (void *)((uintptr_t)rx + (uintptr_t)region->rw_diff);
+}
+
 int hv_jit_region_open(HvJitRegion *region, size_t bytes);
 /* Use memory the host already has: rx executable, rw a writable alias of it (or rx itself on macOS MAP_JIT). */
 int hv_jit_region_attach(HvJitRegion *region, void *rx, void *rw, size_t bytes);

@@ -594,8 +594,8 @@ static int rdbase_to_cpu(HvGicIts *its, uint64_t rdbase) {
     return (int)rdbase < n ? (int)rdbase : 0;
 }
 
-static void its_deliver_locked(HvGicIts *its, uint32_t devid, uint32_t eventid) {
-    if (!(its->ctlr & 1u)) return;
+static int its_deliver_locked(HvGicIts *its, uint32_t devid, uint32_t eventid) {
+    if (!(its->ctlr & 1u)) return 0;
     for (int i = 0; i < HV_ITS_MAX_ITES; i++) {
         if (!its->ite[i].valid) continue;
         if (its->ite[i].devid == devid && its->ite[i].eventid == eventid) {
@@ -607,17 +607,20 @@ static void its_deliver_locked(HvGicIts *its, uint32_t devid, uint32_t eventid) 
                 uint32_t idx = pintid - HV_GIC_LPI_BASE;
                 its->g->cpu[c].lpi_pending[idx / 64] |= 1ull << (idx % 64);
                 hv_gicv3_update_body(its->g);
+                return 1;
             }
-            return;
+            return 0;
         }
     }
+    return 0;
 }
 
-void hv_gicv3_its_msi(HvGicIts *its, uint32_t devid, uint32_t eventid) {
-    if (!its) return;
+int hv_gicv3_its_msi(HvGicIts *its, uint32_t devid, uint32_t eventid) {
+    if (!its) return 0;
     pthread_mutex_lock(&its->g->mu);
-    its_deliver_locked(its, devid, eventid);
+    int routed = its_deliver_locked(its, devid, eventid);
     pthread_mutex_unlock(&its->g->mu);
+    return routed;
 }
 
 static void its_map_ite(HvGicIts *its, uint32_t devid, uint32_t eventid, uint32_t pintid, uint16_t icid) {

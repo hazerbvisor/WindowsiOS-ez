@@ -16,8 +16,8 @@ This project stands on the shoulders of extraordinary open-source systems engine
 | **StikDebug / StikJIT** | [`StephenDev0/StikDebug`](https://github.com/StephenDev0/StikDebug) / `StikJIT` (BluDood / StephenDev0 & contributors) + [`jkcoxson/idevice`](https://github.com/jkcoxson/idevice) | `MPL-2.0` / `BSD-3-Clause` / `MIT` | On-device iOS 26/27 TXM debugger & JIT page-blessing protocol (`universal.js` / `ios/Sources/Resources/henge-jit.js`, `BRK #0x69` / `BRK #0xF00D` dual-mapped RX/RW regions, and `CS_DEBUGGED` ledger-exempt memory setup) |
 | **libslirp** | [`gitlab.freedesktop.org/slirp/libslirp`](https://gitlab.freedesktop.org/slirp/libslirp) / [`utmapp/libslirp`](https://github.com/utmapp/libslirp) (Danny Gasparovski, Fabrice Bellard, QEMU & libslirp contributors) | `BSD-3-Clause` | User-mode TCP/IP + DHCP + DNS NAT stack (`10.0.2.0/24`) linked via `host/net_slirp.c` (fetched & cross-compiled at build time by `scripts/build_ios_deps.sh`) |
 | **GLib / libintl / libffi / PCRE2** | GNOME GLib (`2.83.0`), `proxy-libintl`, `libffi` (`3.5.0`), `PCRE2` | `LGPL-2.1-or-later` / `MIT` / `BSD-3-Clause` | Transitive build-time static libraries required by `libslirp` on `arm64-apple-ios` (`scripts/build_ios_deps.sh`, staged into ignored `ios/deps/`) |
-| **TianoCore EDK2 (`ArmVirtQemu`)** | [`tianocore/edk2`](https://github.com/tianocore/edk2) (TianoCore / Intel / Linaro / Arm contributors) | `BSD-2-Clause-Patent` | `AARCH64` UEFI firmware image (`QEMU_EFI.fd` -> `work/code.fd` + `work/vars.fd`). **Not bundled in this repository**; fetched at provisioning time |
-| **Red Hat `virtio-win` (`NetKVM`)** | [`virtio-win/kvm-guest-drivers-windows`](https://github.com/virtio-win/kvm-guest-drivers-windows) (Red Hat, Inc. & contributors) | `BSD-3-Clause` / `GPL-2.0` | WHQL-signed Windows 11 ARM64 VirtIO Ethernet miniport driver (`NetKVM` `w11/ARM64`). **Not bundled in this repository**; fetched & injected at provisioning time |
+| **TianoCore EDK2 (`ArmVirtQemu`)** | [`tianocore/edk2`](https://github.com/tianocore/edk2) (TianoCore / Intel / Linaro / Arm contributors) | `BSD-2-Clause-Patent` | `AARCH64` UEFI firmware image (`QEMU_EFI.fd` -> `work/code.fd` + `work/vars.fd`). Fetched and bundled into the IPA at build time with QEMU’s license inventory |
+| **Red Hat `virtio-win` (`NetKVM`)** | [`virtio-win/kvm-guest-drivers-windows`](https://github.com/virtio-win/kvm-guest-drivers-windows) (Red Hat, Inc. & contributors) | `BSD-3-Clause` / `GPL-2.0` | Microsoft-attested Windows 11 ARM64 VirtIO Ethernet miniport and protocol service. Fetched and bundled into the IPA at build time with binary redistribution notices |
 
 ---
 
@@ -127,7 +127,7 @@ When building `ios/deps/` locally:
 - **Repository:** <https://github.com/tianocore/edk2>
 - **License:** `BSD-2-Clause-Patent`
 
-`WindowsiOS` boots `AARCH64` UEFI firmware (`ArmVirtQemu` `QEMU_EFI.fd`, mapped into `pflash0` at `0x00000000` with persistent CFI01 NVRAM `pflash1` at `0x04000000`). Firmware binaries (`*.fd`) are **not** stored in this git repository; they are supplied locally in `work/code.fd` and `work/vars.fd` during provisioning.
+`WindowsiOS` boots `AARCH64` UEFI firmware (`ArmVirtQemu` `QEMU_EFI.fd`, mapped into `pflash0` at `0x00000000` with persistent CFI01 NVRAM `pflash1` at `0x04000000`). The IPA build fetches `edk2-aarch64-code.fd` and `edk2-arm-vars.fd` from QEMU 10.2.0 commit `698104725efad4b29079d857dfdebbd804e34c99` and bundles QEMU’s `edk2-licenses.txt` as `EDK2-Licenses.txt`. [QEMU firmware and notices](https://github.com/qemu/qemu/tree/698104725efad4b29079d857dfdebbd804e34c99/pc-bios)
 
 ```text
 SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -186,9 +186,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 - **Repository:** <https://github.com/virtio-win/kvm-guest-drivers-windows>
 - **Copyright:** Copyright (c) Red Hat, Inc. and contributors
-- **License:** `BSD-3-Clause` (source) / WHQL-signed driver package terms (`virtio-win` ISO)
+- **License:** `BSD-3-Clause` for the bundled NetKVM and protocol service components
 
-During offline Windows 11 image provisioning (`scripts/provision_windows_arm64.py`), the WHQL-signed Windows 11 ARM64 `NetKVM` driver (`PCI\VEN_1AF4&DEV_1000&SUBSYS_00011AF4` / transitional VirtIO Ethernet) is injected into the guest driver store via `DISM /Add-Driver`. No `virtio-win` binaries are committed to this repository.
+The IPA build extracts the Windows 11 ARM64 NetKVM miniport, INF, catalog and INF-required `netkvmp.exe` protocol service from the checksum-pinned virtio-win 0.1.285 mirror published by Microsoft OpenVMM. It includes both BSD-3-Clause notices and verifies the catalog signature and pinned Microsoft signer certificate. The public package uses Microsoft attestation. Windows Setup checks catalog membership and Windows trust policy. [OpenVMM mirror and extraction source](https://github.com/microsoft/openvmm-deps/blob/0.3.0-185/Dockerfile.virtio-win) · [NetKVM license](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/bd965ef1ad9bb380496d7386eb4afb02ddee6514/NetKVM/LICENSE) · [Protocol service license](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/bd965ef1ad9bb380496d7386eb4afb02ddee6514/NetKVM/ProtocolService/LICENSE)
 
 ---
 
@@ -198,3 +198,13 @@ The following proprietary operating system and application packages are **never*
 
 - **Microsoft Windows 11 24H2 ARM64** (`Build 26100`) — Property of Microsoft Corporation, governed by the Microsoft Software License Terms. Users supply their own official Microsoft retail ARM64 ESD/ISO (`work/downloads/Win11_24H2_ARM64_en-us.esd`).
 - **Google Antigravity (`2.31.0` Windows ARM64)** — Property of Google LLC, governed by its respective terms of service.
+
+## WindowsiOS-ez reference review
+
+The self-task entitlement diagnostics follow the approach in Henge's [Entitlements.swift](https://github.com/Leviidev/Henge/blob/7b557301195f130f900b1b4cd105c9ecf0fbc109/ios/Henge/Entitlements.swift), under the Henge project's GPL-2.0-or-later license.
+
+WindowsiOS-ez links VideoLAN libudfread at revision `b0bc6957e7e07d5f35391f210596d9eb71cffdd9` to inspect and stream UDF installation media. The library is copyright VLC authors and VideoLAN and is licensed under LGPL-2.1-or-later. The iOS build fetches the unmodified, checksum-pinned source and license. [VideoLAN source archive](https://code.videolan.org/videolan/libudfread/-/archive/b0bc6957e7e07d5f35391f210596d9eb71cffdd9/libudfread-b0bc6957e7e07d5f35391f210596d9eb71cffdd9.tar.gz)
+
+WindowsiOS-ez uses the [wimlib](https://wimlib.net/) 1.14.5 library to add startup files to a local WinPE copy. The device build omits NTFS-3G, FUSE and the desktop tools and uses the library's LGPL-2.1-or-later option. It uses ChaN's [FatFs R0.16](https://elm-chan.org/fsw/ff/) for FAT32 and exFAT, under the permissive license in the source archive. Both releases are fetched from their publishers and checksum-pinned.
+
+The TPM 2.0 backend links [libtpms](https://github.com/stefanberger/libtpms) 0.10.2. IBM and other contributors retain the copyright and license notices included with its source release. The FIFO interface follows the Trusted Computing Group's TPM 2.0 client platform interface. As a reference, [QEMU's TPM implementation](https://www.qemu.org/docs/master/specs/tpm.html) documents that interface and its firmware descriptors. The backend uses [OpenSSL](https://www.openssl.org/) 3.5.9, licensed under Apache-2.0. The combined binary can be distributed under GPLv3 or later under the project's GPL-2.0-or-later terms, with the linked components' corresponding source and license notices.

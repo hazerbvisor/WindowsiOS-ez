@@ -50,6 +50,14 @@ struct SessionView: View {
             }
         }
         .ignoresSafeArea()
+        .alert("Clipboard Text", isPresented: Binding(
+            get: { vm.clipboardError != nil }, set: { if !$0 { vm.clipboardError = nil } }
+        )) {
+            Button("OK", role: .cancel) { vm.clipboardError = nil }
+        } message: {
+            Text(vm.clipboardError ?? "")
+        }
+        .onDisappear { vm.cancelClipboardTyping() }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .defersSystemGestures(on: .all)
@@ -491,6 +499,15 @@ struct SessionView: View {
                     vm.trackpadMode.toggle()
                 }
 
+                if vm.usbKeyboardReady {
+                    PasteButton(payloadType: String.self) { payload in
+                        if let text = payload.first { vm.typeClipboardText(text) }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Type clipboard text in Windows")
+                }
+
                 studioPillItem(icon: "computermouse", label: "R-Click", active: vm.rightClickArmed) {
                     vm.rightClickArmed.toggle()
                 }
@@ -627,7 +644,7 @@ struct SessionView: View {
                     Button {
                         vm.startOrRetry()
                     } label: {
-                        Text(vm.isJITLive ? "BOOT WINDOWS 11" : "RETRY BOOT")
+                        Text(vm.isJITLive ? vm.bootActionTitle : "RETRY BOOT")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .tracking(1.1)
                             .foregroundStyle(Color(red: 0.04, green: 0.05, blue: 0.09))
