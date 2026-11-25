@@ -572,6 +572,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     unsetenv("WINIOS_NEPTUNE_RENDERER");
     unsetenv("WINIOS_NEPTUNE_DXMT");
     unsetenv("WINIOS_NEPTUNE_EGL");
+    unsetenv("WINIOS_NEPTUNE_SHM_DIR");
     // Only the separately built lab IPA has this manifest. The explicit
     // Opt-in SMP lab; normal 1–8 vCPU limits apply.
     if (experimentalGraphics && !installer && cpus >= 1 && cpus <= 8) {
@@ -590,7 +591,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
             if (![NSFileManager.defaultManager fileExistsAtPath:path] ||
                 setenv(vars[i],path.fileSystemRepresentation,1)) available=NO;
         }
-        if (available) setenv("WINIOS_NEPTUNE_LAB","1",1);
+        // The rebuilt renderer uses unlinked files inside our existing
+        // sandbox, not UTM's provisioned app-group POSIX shared memory.
+        if (available && setenv("WINIOS_NEPTUNE_SHM_DIR",NSTemporaryDirectory().fileSystemRepresentation,1)==0)
+            setenv("WINIOS_NEPTUNE_LAB","1",1);
     }
     int createResult = hv_winvm_create(&cfg, err, sizeof err);
     unsetenv("WINIOS_VIRTIO_GPU");

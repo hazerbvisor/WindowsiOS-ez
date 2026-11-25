@@ -69,3 +69,5 @@ Experimental SMP lab candidate: removed 1-vCPU gate, protected GPU aperture life
 Experimental 10 GiB configured budget: 7.5 GiB guest RAM, 1.5 GiB JIT, 1 GiB Neptune tracked allocation limit, selectable 1–8 vCPUs. Both existing memory entitlements preserved. Physical iPad validation pending.
 
 MetalGPU compatibility candidate: native typed scanout, exact guest context-fence identity, deferred 3D transfer completion, per-command diagnostics. Memory and CPU limits unchanged. Real guest device validation outstanding.
+
+MetalGPU context candidate: rebuild pinned virglrenderer with app-container temporary shared files instead of named POSIX shm, tolerate idempotent context cleanup and independently owned resources, report context result codes and renderer warning messages. Prior diagnostics confirm native scanout, not successful Neptune context creation. Hardware test pending.

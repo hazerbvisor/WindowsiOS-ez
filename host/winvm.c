@@ -26,7 +26,7 @@
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
-static char stopped_graphics[768];
+static char stopped_graphics[4096];
 static pthread_t sec_threads[HV_MAX_CPUS];
 static int ncpus = 1;
 static HvWinVirt board;

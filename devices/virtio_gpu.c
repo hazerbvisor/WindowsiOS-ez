@@ -903,6 +903,10 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
         int n=snprintf(buffer+used,capacity-used,"neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 "\n",
             count,bytes,gpu->neptune_submits,gpu->neptune_completed);
         if (n>0) used+=(size_t)n;
+        if (used<capacity) {
+            hv_neptune_context_diagnostics(gpu->neptune,buffer+used,capacity-used);
+            used+=strlen(buffer+used);
+        }
     }
 #endif
     for (unsigned i=0;i<16 && used<capacity;++i) if (gpu->errors[i].count) {

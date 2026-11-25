@@ -14,6 +14,8 @@ struct virgl_box { uint32_t x,y,z,w,h,d; };
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <inttypes.h>
 
 typedef struct Blob {
     uint32_t id, context;
@@ -53,7 +55,10 @@ struct HvNeptune {
     struct virgl_renderer_callbacks callbacks;
     pthread_mutex_t mutex;
     bool initialized;
-    uint32_t contexts[HV_NPT_MAX_CONTEXTS];
+    uint32_t contexts[HV_NPT_MAX_CONTEXTS], context_caps[HV_NPT_MAX_CONTEXTS];
+    uint64_t ctx_attempts,ctx_success,ctx_fail,ctx_destroy,ctx_missing_destroy;
+    uint32_t last_ctx_id,last_ctx_cap;
+    int last_ctx_rc;
     Blob blobs[HV_NPT_MAX_BLOBS];
     Pending pending[HV_NPT_MAX_FENCES];
     uint64_t allocated, next_ticket;
@@ -61,6 +66,24 @@ struct HvNeptune {
 /* virglrenderer is process-global. Multiple instances are not supported. */
 static pthread_mutex_t instance_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool instance_live;
+/* The renderer is process-global and workers may emit logs on other
+ * threads. Static bounded storage avoids callback lifetime races. */
+static pthread_mutex_t renderer_log_lock=PTHREAD_MUTEX_INITIALIZER;
+static char renderer_logs[3][192];
+static unsigned renderer_log_next;
+static void renderer_log(enum virgl_log_level_flags level,const char *message,void *data) {
+    (void)data;
+    if (level<VIRGL_LOG_LEVEL_WARNING || !message) return;
+    pthread_mutex_lock(&renderer_log_lock);
+    char *dst=renderer_logs[renderer_log_next++%3];
+    size_t i=0;
+    for (; i<191 && message[i]; ++i) {
+        unsigned char ch=(unsigned char)message[i];
+        dst[i]=(ch>=32 && ch<127)?(char)ch:' ';
+    }
+    dst[i]=0;
+    pthread_mutex_unlock(&renderer_log_lock);
+}
 
 static int context_slot(HvNeptune *n, uint32_t id) {
     if (!id) return -1;
@@ -137,6 +160,12 @@ HvNeptune *hv_neptune_open(const char *renderer_path, const char *dxmt_path) {
 } while(0);
     NPT_API(LOAD)
 #undef LOAD
+    pthread_mutex_lock(&renderer_log_lock);
+    memset(renderer_logs,0,sizeof(renderer_logs)); renderer_log_next=0;
+    pthread_mutex_unlock(&renderer_log_lock);
+    union { void *p; __typeof__(&virgl_set_log_callback) f; } logfn;
+    logfn.p=dlsym(n->renderer,"virgl_set_log_callback");
+    if (logfn.f) logfn.f(renderer_log,NULL,NULL);
     n->callbacks.version=VIRGL_RENDERER_CALLBACKS_VERSION;
     n->callbacks.write_fence=old_fence;
     n->callbacks.write_context_fence=context_fence;
@@ -183,32 +212,54 @@ int hv_neptune_context_create(HvNeptune *n,uint32_t id,const char *name,size_t l
     return hv_neptune_context_create_cap(n,id,HV_NPT_CAPSET,name,length);
 }
 int hv_neptune_context_create_cap(HvNeptune *n,uint32_t id,uint32_t capset,const char *name,size_t length) {
-    if (capset!=2 && capset!=HV_NPT_CAPSET) return -1;
-    if (!n || !id || id>INT32_MAX || length>64 || (length && !name) || context_slot(n,id)>=0) return -1;
+    if (!n) return -1;
+    n->ctx_attempts++;
+    n->last_ctx_id=id; n->last_ctx_cap=capset;
+    /* A zero context_init is the legacy VirGL context, as in upstream QEMU. */
+    if (!capset) capset=1;
+    int rc=EINVAL;
+    if ((capset!=1 && capset!=2 && capset!=HV_NPT_CAPSET) ||
+        !id || id>INT32_MAX || length>64 || (length && !name)) goto failed;
+    int existing=context_slot(n,id);
+    if (existing>=0) {
+        if (n->context_caps[existing]!=capset) goto failed;
+        n->ctx_success++; n->last_ctx_rc=0; return 0;
+    }
+    rc=ENOSPC;
     for (size_t i=0;i<HV_NPT_MAX_CONTEXTS;++i) if (!n->contexts[i]) {
         char safe[65]={0};
         if (length) memcpy(safe,name,length);
-        if (n->virgl_renderer_context_create_with_flags(id,capset,(uint32_t)length,safe)) return -1;
-        n->contexts[i]=id;
+        rc=n->virgl_renderer_context_create_with_flags(id,capset,(uint32_t)length,safe);
+        if (rc) goto failed;
+        n->contexts[i]=id; n->context_caps[i]=capset;
+        n->ctx_success++; n->last_ctx_rc=0;
         return 0;
     }
-    return -1;
+failed:
+    n->last_ctx_rc=rc; n->ctx_fail++; return -1;
 }
 
 int hv_neptune_context_destroy(HvNeptune *n,uint32_t id) {
     if (!n) return -1;
     int slot=context_slot(n,id);
-    if (slot<0) return -1;
-    /* Require resource and fence retirement first. Never silently signal
-     * outstanding work as successful when a context is destroyed. */
-    for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (n->blobs[i].id && n->blobs[i].context==id) return -1;
+    /* The driver destroys unused context IDs as well as live contexts.
+     * Upstream virglrenderer treats a missing ID as a no-op. Global resources
+     * are independently owned and may outlive their creating context. */
+    if (slot<0) { n->ctx_missing_destroy++; return 0; }
+    n->virgl_renderer_context_destroy(id);
+    n->contexts[slot]=0; n->context_caps[slot]=0;
+    n->ctx_destroy++;
+    /* Destroy joins renderer context workers. Never report success for
+     * timeline work abandoned by teardown: invalidate unretired tickets
+     * so the VirtIO queue completes them with an error. Legacy ctx0
+     * fences are independent and continue to retire normally. */
     pthread_mutex_lock(&n->mutex);
-    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) if (n->pending[i].fence.ticket && n->pending[i].fence.context==id) {
-        pthread_mutex_unlock(&n->mutex); return -1;
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) {
+        Pending *p=&n->pending[i];
+        if (p->fence.ticket && !p->legacy && !p->done && p->fence.context==id)
+            *p=(Pending){0};
     }
     pthread_mutex_unlock(&n->mutex);
-    n->virgl_renderer_context_destroy(id);
-    n->contexts[slot]=0;
     return 0;
 }
 
@@ -400,6 +451,25 @@ unsigned hv_neptune_resource_count(HvNeptune *n,uint64_t *bytes) {
     if (n) for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) count+=n->blobs[i].id!=0;
     return count;
 }
+void hv_neptune_context_diagnostics(HvNeptune *n,char *buffer,size_t capacity) {
+    if (!capacity) return;
+    if (!n) { *buffer=0; return; }
+    unsigned live=0;
+    for (size_t i=0;i<HV_NPT_MAX_CONTEXTS;++i) live+=n->contexts[i]!=0;
+    int len=snprintf(buffer,capacity,"neptune_contexts: live=%u attempts=%" PRIu64 " success=%" PRIu64 " fail=%" PRIu64 " destroyed=%" PRIu64 " missing_destroy=%" PRIu64 " last_id=%u last_cap=%u last_rc=%d container_shmem=%u\n",
+        live,n->ctx_attempts,n->ctx_success,n->ctx_fail,n->ctx_destroy,n->ctx_missing_destroy,
+        n->last_ctx_id,n->last_ctx_cap,n->last_ctx_rc,getenv("WINIOS_NEPTUNE_SHM_DIR")?1u:0u);
+    if (len<0) return;
+    size_t used=(size_t)len;
+    pthread_mutex_lock(&renderer_log_lock);
+    unsigned count=renderer_log_next<3?renderer_log_next:3;
+    for (unsigned i=0;i<count && used<capacity;++i) {
+        const char *line=renderer_logs[(renderer_log_next-count+i)%3];
+        int k=snprintf(buffer+used,capacity-used,"renderer_warning: %s\n",line);
+        if (k>0) used+=(size_t)k;
+    }
+    pthread_mutex_unlock(&renderer_log_lock);
+}
 void hv_neptune_scanout_release(HvNeptune *n,void *texture) {
     if (n && texture) n->virgl_renderer_release_handle_for_scanout(VIRGL_NATIVE_HANDLE_METAL_TEXTURE,texture);
 }
@@ -426,6 +496,7 @@ int hv_neptune_reset(HvNeptune *n) {
     }
     n->virgl_renderer_reset();
     memset(n->contexts,0,sizeof(n->contexts));
+    memset(n->context_caps,0,sizeof(n->context_caps));
     memset(n->blobs,0,sizeof(n->blobs));
     n->allocated=0;
     pthread_mutex_lock(&n->mutex);

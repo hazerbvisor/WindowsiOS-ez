@@ -1,7 +1,7 @@
-name: MetalGPU protocol compatibility IPA
+name: MetalGPU container shared-memory IPA
 on:
   push:
-    branches: [build/metalgpu-protocol-fix]
+    branches: [build/metalgpu-shmem-fix]
     paths: [.github/workflows/one-off-metalgpu.yml]
 permissions:
   contents: read
@@ -30,6 +30,41 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci_precompiled_metalgpu.sh
+      - name: Rebuild only pinned virglrenderer with container-backed shared files
+        run: |
+          set -euo pipefail
+          export NEPTUNE_IOS_DEPS_PREFIX="$WINIOS_GPU_PREBUILT_PREFIX"
+          export WINIOS_PATCH_NEPTUNE_SHMEM=1
+          # Relocate pkg-config prefixes from the official UTM CI sysroot.
+          python3 - <<'PY'
+          import os,pathlib,re
+          prefix=pathlib.Path(os.environ["WINIOS_GPU_PREBUILT_PREFIX"])
+          for p in prefix.glob("**/*.pc"):
+              if p.parent not in (prefix/"lib/pkgconfig",prefix/"share/pkgconfig"): continue
+              s=p.read_text()
+              s=re.sub(r"(?m)^prefix=.*$",lambda _: "prefix="+str(prefix),s)
+              p.write_text(s)
+          PY
+          bash scripts/build_neptune_backend.sh
+          lib="$PWD/work/metalgpu-neptune/dd0652b13e589c4c124ea79123a3adcd85173f4f/install/lib/libvirglrenderer.dylib"
+          dest="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$WINIOS_GPU_PREBUILT_PREFIX/lib/libvirglrenderer.dylib")"
+          cp "$lib" "$dest"
+          xcrun lipo -verify_arch arm64 "$dest"
+          xcrun vtool -show-build "$dest" | grep -Eq 'platform IOS
+        run: |
+          python3 -m unittest discover -s tests -p test_virtio_gpu.py
+          cc -std=c11 -Wall -Wextra -Werror tests/test_gpu_modes.c -o "$RUNNER_TEMP/gpu-modes"
+          "$RUNNER_TEMP/gpu-modes"
+      - name: Compile WindowsiOS and package precompiled GPU frameworks
+        run: bash scripts/build_unsigned_ipa.sh
+      - name: Upload verified lab IPA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: WindowsiOS-ez-MetalGPU-ShmemFix-unsigned
+          path: build/artifacts/metalgpu-lab/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Check existing VirtIO GPU regressions
         run: |
           python3 -m unittest discover -s tests -p test_virtio_gpu.py
@@ -40,7 +75,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-ProtocolFix-unsigned
+          name: WindowsiOS-ez-MetalGPU-ShmemFix-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7
