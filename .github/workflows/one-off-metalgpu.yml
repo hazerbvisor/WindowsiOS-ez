@@ -1,5 +1,4 @@
 name: One-off MetalGPU lab IPA
-# Retry 3: target only ANGLE archive; export project path for nested build script.
 on:
   push:
     branches: [build/metalgpu-cd413b7]
@@ -7,9 +6,27 @@ on:
 permissions:
   contents: read
 jobs:
+  cancel-superseded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Cancel only the superseded source build
+        run: |
+          set -euo pipefail
+          status="$(gh api repos/${{ github.repository }}/actions/runs/45616501786 --jq .status)"
+          if [ "$status" != completed ]; then
+            gh api --method POST repos/${{ github.repository }}/actions/runs/45616501786/cancel
+          else
+            echo "Old run is already completed."
+          fi
   lab-ipa:
     runs-on: xcode-27
-    timeout-minutes: 180
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -24,21 +41,19 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$(xcodebuild -version | head -n 1)" = "Xcode 27.2"
-          for formula in xcodegen meson ninja pkgconf autoconf automake libtool cmake python bison; do
+          for formula in xcodegen meson ninja pkgconf autoconf automake libtool; do
             if ! brew list --versions "$formula" >/dev/null; then brew install "$formula"; fi
           done
-          python3 -m venv "$RUNNER_TEMP/metalgpu-venv"
-          "$RUNNER_TEMP/metalgpu-venv/bin/pip" install mako pyyaml packaging six pyparsing setuptools
-          echo "$RUNNER_TEMP/metalgpu-venv/bin" >> "$GITHUB_PATH"
-          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
-      - name: Build pinned physical iOS graphics prerequisites
-        run: bash scripts/ci_metalgpu_prereqs.sh
-      - name: Build and verify MetalGPU lab IPA
+      - name: Download and verify pinned official UTM iOS ARM64 sysroot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci_precompiled_metalgpu.sh
+      - name: Compile WindowsiOS and package precompiled GPU frameworks
         run: bash scripts/build_unsigned_ipa.sh
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-cd413b7-unsigned
+          name: WindowsiOS-ez-MetalGPU-precompiled-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

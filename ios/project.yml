@@ -76,6 +76,9 @@ targets:
           - $(inherited)
           - $(PROJECT_DIR)/../build/ios
           - $(PROJECT_DIR)/deps/lib
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - '@executable_path/Frameworks'
         OTHER_LDFLAGS:
           - $(inherited)
           - -lwinvm

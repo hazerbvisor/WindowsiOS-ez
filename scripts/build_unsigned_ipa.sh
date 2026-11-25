@@ -23,12 +23,18 @@ LAB="${WINIOS_NEPTUNE_LAB:-0}"
 OUT="$ROOT/build/artifacts"
 # Never reuse an archive compiled with the other feature configuration.
 if [[ "$LAB" == 1 ]]; then
-    : "${NEPTUNE_IOS_DEPS_PREFIX:?Set the physical iOS ANGLE/libepoxy/epoll-shim prefix}"
-    : "${DXMT_IOS_LLVM_PREFIX:?Set the physical iOS LLVM 15.0.7 prefix}"
-    bash scripts/build_dxmt_probe.sh
-    bash scripts/build_neptune_backend.sh
-    NPT="$ROOT/work/metalgpu-neptune/dd0652b13e589c4c124ea79123a3adcd85173f4f/install"
-    DXMT="$ROOT/work/metalgpu-dxmt/1fe2e752c98207518a99c9322482f63ebb9f0232/install"
+    if [[ -n "${WINIOS_GPU_PREBUILT_PREFIX:-}" ]]; then
+        NPT="$WINIOS_GPU_PREBUILT_PREFIX"
+        DXMT="$WINIOS_GPU_PREBUILT_PREFIX"
+        NEPTUNE_IOS_DEPS_PREFIX="$WINIOS_GPU_PREBUILT_PREFIX"
+    else
+        : "${NEPTUNE_IOS_DEPS_PREFIX:?Set the physical iOS ANGLE/libepoxy prefix}"
+        : "${DXMT_IOS_LLVM_PREFIX:?Set the physical iOS LLVM 15.0.7 prefix}"
+        bash scripts/build_dxmt_probe.sh
+        bash scripts/build_neptune_backend.sh
+        NPT="$ROOT/work/metalgpu-neptune/dd0652b13e589c4c124ea79123a3adcd85173f4f/install"
+        DXMT="$ROOT/work/metalgpu-dxmt/1fe2e752c98207518a99c9322482f63ebb9f0232/install"
+    fi
     HDR="$NPT/include/virgl"
     [[ -f "$HDR/virglrenderer.h" ]] || HDR="$NPT/include"
     rm -rf build/ios
@@ -74,8 +80,12 @@ for archive in libwinvm.a libslirp.a libglib-2.0.a libudfread.a libfatfs.a libwi
 done
 
 if [[ "$LAB" == 1 ]]; then
-    python3 scripts/stage_neptune_ipa.py "$APP" "$NPT/lib/libvirglrenderer.dylib" "$DXMT/lib/libdxmt-native.dylib" \
-        "$NEPTUNE_IOS_DEPS_PREFIX/lib/libEGL.dylib" "$NPT/lib" "$DXMT/lib" "$NEPTUNE_IOS_DEPS_PREFIX/lib"
+    if [[ -n "${WINIOS_GPU_PREBUILT_PREFIX:-}" ]]; then
+        python3 scripts/stage_precompiled_gpu.py "$APP" "$WINIOS_GPU_PREBUILT_PREFIX"
+    else
+        python3 scripts/stage_neptune_ipa.py "$APP" "$NPT/lib/libvirglrenderer.dylib" "$DXMT/lib/libdxmt-native.dylib" \
+            "$NEPTUNE_IOS_DEPS_PREFIX/lib/libEGL.dylib" "$NPT/lib" "$DXMT/lib" "$NEPTUNE_IOS_DEPS_PREFIX/lib"
+    fi
 fi
 
 mkdir "$STAGE/Payload"

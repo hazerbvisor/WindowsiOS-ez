@@ -568,11 +568,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         NSString *folder = NSBundle.mainBundle.privateFrameworksPath;
         NSArray *keys = @[@"Renderer", @"DXMT", @"EGL"];
         NSArray *names = @[@"libvirglrenderer.dylib", @"libdxmt-native.dylib", @"libEGL.dylib"];
+        NSArray *frameworkNames = @[@"virglrenderer.framework/virglrenderer", @"dxmt-native.framework/dxmt-native", @"EGL.framework/EGL"];
         const char *vars[] = {"WINIOS_NEPTUNE_RENDERER","WINIOS_NEPTUNE_DXMT","WINIOS_NEPTUNE_EGL"};
         BOOL available = folder != nil && libs != nil;
         for (NSUInteger i=0; available && i<keys.count; ++i) {
             NSString *name=libs[keys[i]];
-            if (![name isEqual:names[i]]) { available=NO; break; }
+            if (![name isEqual:names[i]] && ![name isEqual:frameworkNames[i]]) { available=NO; break; }
             NSString *path=[folder stringByAppendingPathComponent:name];
             if (![NSFileManager.defaultManager fileExistsAtPath:path] ||
                 setenv(vars[i],path.fileSystemRepresentation,1)) available=NO;
