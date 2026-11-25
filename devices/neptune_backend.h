@@ -38,6 +38,10 @@ int hv_neptune_blob_unmap(HvNeptune *n, uint32_t resource);
 int hv_neptune_blob_destroy(HvNeptune *n, uint32_t resource);
 /* Serialized scalar access only. Not an implementation of guest normal
  * memory, atomics, exclusive accesses or a dynamic JIT/TLB mapping. */
+/* Borrowed pointer valid only until the next owner-thread map/unmap/reset. */
+void *hv_neptune_aperture_ptr(HvNeptune *n, uint64_t offset, uint64_t bytes);
+bool hv_neptune_blob_exists(HvNeptune *n, uint32_t resource);
+int hv_neptune_reset(HvNeptune *n);
 int hv_neptune_aperture_access(HvNeptune *n, uint64_t offset, void *data, size_t bytes, bool write);
 int hv_neptune_fence_submit(HvNeptune *n, uint32_t context, uint32_t ring, uint64_t guest_id, uint64_t *ticket);
 void hv_neptune_poll(HvNeptune *n);

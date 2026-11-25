@@ -82,6 +82,13 @@ IOS_C_SRC = $(wildcard core/*.c) \
             host/audio_mac.c host/hvsparse.c host/prof_ios.c \
             host/installer_disk.c host/installer_winpe.c host/disc_image.c host/media_hash.c host/tpm_device.c \
             $(filter-out devices/neptune_backend.c devices/neptune_wire.c,$(wildcard devices/*.c))
+ifeq ($(WINIOS_NEPTUNE_LAB),1)
+ifndef NEPTUNE_HEADERS
+$(error Set NEPTUNE_HEADERS to the pinned iPhoneOS virglrenderer header directory)
+endif
+IOS_C_SRC += devices/neptune_backend.c devices/neptune_wire.c
+IOS_CFLAGS += -DWINIOS_ENABLE_NEPTUNE -D_DARWIN_C_SOURCE -I$(NEPTUNE_HEADERS)
+endif
 $(IB)/host/installer_disk.o $(IB)/host/installer_winpe.o $(IB)/host/tpm_device.o: IOS_CFLAGS += -D_DARWIN_C_SOURCE
 $(IB)/devices/winvirt.o: IOS_CFLAGS += -DWINIOS_DEVICE_TPM
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_C_SRC)) $(IB)/host/enter.o $(IB)/devices/fb_metal.o

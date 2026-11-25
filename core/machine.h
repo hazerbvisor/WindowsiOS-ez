@@ -197,6 +197,12 @@ typedef struct HvMachine {
     HvMmio mmio[HV_MAX_MMIO];
     int nmmio;
 
+    /* Optional CPU-only normal-memory device aperture. Never used by DMA,
+       page walks or instruction fetch; never cached in JIT/TLB entries.
+       Only the CPU0 thread may resolve it, and only with one guest vCPU. */
+    void *cpu_aperture_opaque;
+    void *(*cpu_aperture_ptr)(void *opaque, uint64_t pa, uint64_t bytes);
+
     HvJitRegion jit;
     HvBlock *hash[HV_BLOCK_HASH];
     HvBlock *blocks;

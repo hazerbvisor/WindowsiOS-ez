@@ -21,7 +21,7 @@ typedef struct Pending {
 } Pending;
 
 #define NPT_API(X) \
- X(virgl_renderer_init) X(virgl_renderer_cleanup) \
+ X(virgl_renderer_init) X(virgl_renderer_cleanup) X(virgl_renderer_reset) \
  X(virgl_renderer_get_cap_set) X(virgl_renderer_fill_caps) \
  X(virgl_renderer_context_create_with_flags) X(virgl_renderer_context_destroy) \
  X(virgl_renderer_submit_cmd) X(virgl_renderer_context_create_fence) \
@@ -231,6 +231,35 @@ int hv_neptune_blob_destroy(HvNeptune *n,uint32_t resource) {
     if (!b || b->map) return -1;
     n->virgl_renderer_resource_unref(resource);
     n->allocated-=b->bytes; *b=(Blob){0};
+    return 0;
+}
+
+bool hv_neptune_blob_exists(HvNeptune *n,uint32_t resource) { return n && blob(n,resource)!=NULL; }
+
+void *hv_neptune_aperture_ptr(HvNeptune *n,uint64_t offset,uint64_t bytes) {
+    if (!n || !bytes || offset>=HV_NPT_APERTURE_BYTES || bytes>HV_NPT_APERTURE_BYTES-offset) return NULL;
+    for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) {
+        Blob *b=&n->blobs[i];
+        if (!b->map || offset<b->offset) continue;
+        uint64_t rel=offset-b->offset;
+        if (rel<b->mapped_bytes && bytes<=b->mapped_bytes-rel) return (uint8_t *)b->map+rel;
+    }
+    return NULL;
+}
+
+int hv_neptune_reset(HvNeptune *n) {
+    if (!n || !n->initialized) return -1;
+    for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (n->blobs[i].id) {
+        if (n->blobs[i].map) (void)hv_neptune_blob_unmap(n,n->blobs[i].id);
+        n->virgl_renderer_resource_unref(n->blobs[i].id);
+    }
+    n->virgl_renderer_reset();
+    memset(n->contexts,0,sizeof(n->contexts));
+    memset(n->blobs,0,sizeof(n->blobs));
+    n->allocated=0;
+    pthread_mutex_lock(&n->mutex);
+    memset(n->pending,0,sizeof(n->pending));
+    pthread_mutex_unlock(&n->mutex);
     return 0;
 }
 

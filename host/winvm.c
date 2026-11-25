@@ -367,6 +367,9 @@ void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity) {
 
 int hv_winvm_run_cpu0(void) {
     prepare_cpu_thread();
+    hv_dev_lock(&m);
+    hv_virtio_gpu_start_neptune(board.gpu,ncpus);
+    hv_dev_unlock(&m);
     for (;;) {
         int r = hv_run(&cpus[0]);
         hv_winvm_flush_disks();

@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "virtio_gpu.h"
+#ifdef WINIOS_ENABLE_NEPTUNE
+#include "neptune_wire.h"
+#endif
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -52,6 +55,17 @@ typedef struct Cursor {
     uint8_t pixels[CURSOR_SIZE * CURSOR_SIZE * 4];
 } Cursor;
 
+#ifdef WINIOS_ENABLE_NEPTUNE
+/* Store the private descriptor snapshot and response until the exact renderer
+ * fence completes. No callback thread touches guest memory or used rings. */
+typedef struct NeptuneReply {
+    uint64_t ticket;
+    HvVirtqElem elem;
+    uint32_t bytes;
+    uint8_t response[24];
+} NeptuneReply;
+#endif
+
 struct HvVirtioGpu {
     HvVirtio vio;
     HvFbDisplay *fb;
@@ -61,6 +75,11 @@ struct HvVirtioGpu {
     size_t allocated;
     bool pending[QUEUES];
     uint64_t completed[QUEUES], malformed, command_errors, publishes, resets;
+#ifdef WINIOS_ENABLE_NEPTUNE
+    HvNeptune *neptune;
+    NeptuneReply deferred[HV_NPT_MAX_FENCES];
+    uint64_t neptune_submits, neptune_completed;
+#endif
 };
 
 typedef struct DisplayInfo {
@@ -402,6 +421,147 @@ static void cursor_command(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
     if (pixels) publish(gpu, pixels);
 }
 
+#ifdef WINIOS_ENABLE_NEPTUNE
+/* BAR 0/1 is free (MSI-X is BAR2, modern virtio config BAR4). It is
+ * advertised as host-visible shared memory only in the lab candidate.
+ * Resolve the live BAR on every CPU access, never retain a TLB pointer. */
+static void *neptune_cpu_ptr(void *opaque,uint64_t pa,uint64_t bytes) {
+    HvVirtioGpu *gpu=opaque;
+    HvPciDev *d=&gpu->vio.pci;
+    HvPcie *bus=d->bus;
+    uint64_t base=hv_pci_bar_addr(d,0);
+    if (!gpu->neptune || !bytes || !hv_pci_mem_enabled(d) || !base ||
+        base<bus->high_mmio_base || base-bus->high_mmio_base>=bus->high_mmio_size ||
+        HV_NPT_APERTURE_BYTES>bus->high_mmio_size-(base-bus->high_mmio_base) ||
+        pa<base || pa-base>=HV_NPT_APERTURE_BYTES ||
+        bytes>HV_NPT_APERTURE_BYTES-(pa-base)) return NULL;
+    /* Refuse overlaps with any other enabled BAR instead of intercepting its MMIO. */
+    for (int slot=0;slot<HV_PCI_SLOTS;++slot) {
+        HvPciDev *other=bus->dev[slot];
+        if (!other || !hv_pci_mem_enabled(other)) continue;
+        for (int bar=0;bar<6;++bar) {
+            if (other==d && bar==0) continue;
+            uint64_t len=other->bar_size[bar], start=hv_pci_bar_addr(other,bar);
+            if (len && start && start<base+HV_NPT_APERTURE_BYTES &&
+                base<start+len && start+len>=start) return NULL;
+        }
+    }
+    return hv_neptune_aperture_ptr(gpu->neptune,pa-base,bytes);
+}
+
+static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *written,bool *deferred) {
+    Header hdr={0};
+    HvVirtio *v=&gpu->vio;
+    if (!gpu->neptune || (v->driver_features & 0x19)!=0x19 ||
+        hv_virtq_read(v,elem,0,&hdr,sizeof(hdr))!=sizeof(hdr)) return false;
+    bool route=(hdr.type>=0x200 && hdr.type<=0x209) || hdr.type==GET_CAPSET_INFO ||
+        hdr.type==GET_CAPSET || hdr.type==0x10c;
+    if (hdr.type==RESOURCE_UNREF) {
+        uint32_t id=0;
+        if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4)
+            route=hv_neptune_blob_exists(gpu->neptune,id);
+    }
+    if (!route) return false;
+    uint64_t length=segment_capacity(elem,0), capacity=segment_capacity(elem,1);
+    if (length<sizeof(hdr) || length>HV_NPT_MAX_SUBMIT+32 || capacity<sizeof(hdr)) return true;
+    NeptuneReply *slot=NULL;
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) if (!gpu->deferred[i].ticket) { slot=&gpu->deferred[i]; break; }
+    uint8_t reply[24+HV_NPT_MAX_CAPSET]={0};
+    uint64_t ticket=0;
+    size_t n=0;
+    if (!slot) {
+        Header error=hdr; error.type=ERR_OOM;
+        memcpy(reply,&error,sizeof(error)); n=sizeof(error);
+    } else {
+        uint8_t *request=malloc((size_t)length);
+        if (!request) {
+            Header error=hdr; error.type=ERR_OOM;
+            memcpy(reply,&error,sizeof(error)); n=sizeof(error);
+        } else {
+            if (hv_virtq_read(v,elem,0,request,(uint32_t)length)==length) {
+                /* Keep the resource namespace common across 2D and 3D. */
+                uint32_t id=0;
+                if (hdr.type==0x10c && length>=28) memcpy(&id,request+24,4);
+                if (id && lookup(gpu,id)) {
+                    Header error=hdr; error.type=ERR_RESOURCE;
+                    memcpy(reply,&error,sizeof(error)); n=sizeof(error);
+                } else n=hv_neptune_wire_command(gpu->neptune,request,(size_t)length,reply,
+                    capacity<sizeof(reply)?(size_t)capacity:sizeof(reply),&ticket);
+            }
+            free(request);
+        }
+    }
+    if (ticket) {
+        /* Currently only SUBMIT can defer, whose response is a header. */
+        if (n!=sizeof(Header)) { v->status|=64; return true; }
+        slot->ticket=ticket;
+        slot->elem=*elem;
+        slot->bytes=(uint32_t)n;
+        memcpy(slot->response,reply,n);
+        *deferred=true;
+        gpu->neptune_submits++;
+    } else if (n) {
+        uint32_t type=0; memcpy(&type,reply,4);
+        if (type>=ERR_UNSPEC) gpu->command_errors++;
+        *written=hv_virtq_write(v,elem,0,reply,(uint32_t)n);
+    }
+    return true;
+}
+
+static void neptune_retire(HvVirtioGpu *gpu) {
+    if (!gpu->neptune) return;
+    hv_neptune_poll(gpu->neptune);
+    bool interrupt=false;
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) {
+        NeptuneReply *p=&gpu->deferred[i];
+        if (!p->ticket) continue;
+        HvNeptuneFence fence;
+        int result=hv_neptune_fence_take(gpu->neptune,p->ticket,&fence);
+        if (!result) continue;
+        Header response; memcpy(&response,p->response,sizeof(response));
+        if (result<0 || fence.context!=response.context || fence.ring!=response.ring || fence.guest_id!=response.fence) {
+            response.type=ERR_UNSPEC;
+            memcpy(p->response,&response,sizeof(response));
+            gpu->command_errors++;
+        }
+        uint32_t written=hv_virtq_write(&gpu->vio,&p->elem,0,p->response,p->bytes);
+        hv_virtq_push(&gpu->vio,0,&p->elem,written);
+        gpu->completed[0]++;
+        gpu->neptune_completed++;
+        *p=(NeptuneReply){0};
+        interrupt=true;
+    }
+    if (interrupt) hv_virtio_queue_interrupt(&gpu->vio,0);
+}
+#endif
+
+void hv_virtio_gpu_start_neptune(HvVirtioGpu *gpu,int ncpus) {
+#ifdef WINIOS_ENABLE_NEPTUNE
+    /* Explicit lab override only. Driver v0.6 still needs the VirGL shadow
+     * context and scanout integration; do not expose this in ordinary UI. */
+    const char *enabled=getenv("WINIOS_NEPTUNE_LAB");
+    if (!gpu || ncpus!=1 || !enabled || strcmp(enabled,"1") || gpu->neptune) return;
+    gpu->neptune=hv_neptune_open(getenv("WINIOS_NEPTUNE_RENDERER"),getenv("WINIOS_NEPTUNE_DXMT"));
+    if (!gpu->neptune) { fprintf(stderr,"winvm: Neptune lab renderer unavailable; leaving 2D adapter\n"); return; }
+    HvVirtio *v=&gpu->vio;
+    hv_pci_add_bar_flags(&v->pci,0,HV_NPT_APERTURE_BYTES,1,1);
+    /* VirtIO PCI shared-memory capability, cfg_type=8, id=1, 64-bit length.
+     * MSI-X ends at 0x94; prepend this read-only capability at 0xa0. */
+    uint8_t *cap=v->pci.config+0xa0;
+    cap[0]=9; cap[1]=v->pci.config[0x34]; cap[2]=24; cap[3]=8; cap[4]=0; cap[5]=1;
+    uint32_t lo=(uint32_t)HV_NPT_APERTURE_BYTES,hi=(uint32_t)(HV_NPT_APERTURE_BYTES>>32);
+    memcpy(cap+12,&lo,4); memcpy(cap+20,&hi,4);
+    v->pci.config[0x34]=0xa0;
+    v->features|=0x19; /* VIRGL transport, RESOURCE_BLOB, CONTEXT_INIT */
+    v->config[12]=1; /* Neptune only; explicitly NOT a v0.6-compatible device yet. */
+    v->m->cpu_aperture_opaque=gpu;
+    v->m->cpu_aperture_ptr=neptune_cpu_ptr;
+    fprintf(stderr,"winvm: single-vCPU Neptune LAB transport enabled (no shadow VirGL/scanout)\n");
+#else
+    (void)gpu; (void)ncpus;
+#endif
+}
+
 static void notify(HvVirtio *vio, int queue) {
     HvVirtioGpu *gpu = vio->dev;
     bool completed = false;
@@ -412,8 +572,15 @@ static void notify(HvVirtio *vio, int queue) {
         if (!result) { gpu->pending[queue] = false; break; }
         uint32_t written = 0;
         if (result > 0) {
-            if (!queue) written = control(gpu, &elem);
-            else cursor_command(gpu, &elem);
+            if (!queue) {
+#ifdef WINIOS_ENABLE_NEPTUNE
+                bool deferred=false;
+                if (neptune_control(gpu,&elem,&written,&deferred)) {
+                    if (deferred) continue;
+                } else
+#endif
+                written = control(gpu, &elem);
+            } else cursor_command(gpu, &elem);
         }
         if (result < 0 || (!queue && !written)) gpu->malformed++;
         hv_virtq_push(vio, queue, &elem, written);
@@ -425,6 +592,9 @@ static void notify(HvVirtio *vio, int queue) {
 
 void hv_virtio_gpu_poll(HvVirtioGpu *gpu) {
     if (!gpu || !(gpu->vio.status & 4) || (gpu->vio.status & 0xc0)) return;
+#ifdef WINIOS_ENABLE_NEPTUNE
+    neptune_retire(gpu);
+#endif
     for (int q = 0; q < QUEUES && !(gpu->vio.status & 64); q++)
         if (gpu->pending[q]) notify(&gpu->vio, q);
 }
@@ -433,6 +603,13 @@ static void reset_device(HvVirtio *vio) {
     HvVirtioGpu *gpu = vio->dev;
     gpu->resets++;
     clear_scanout(gpu);
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (gpu->neptune) {
+        memset(gpu->deferred,0,sizeof(gpu->deferred));
+        if (gpu->vio.m->cpu) gpu->vio.m->cpu->excl_addr=~0ull;
+        (void)hv_neptune_reset(gpu->neptune);
+    }
+#endif
     for (unsigned i = 0; i < RESOURCES; i++)
         if (gpu->resources[i].id) release(gpu, &gpu->resources[i]);
     gpu->cursor = (Cursor){0};
@@ -471,6 +648,13 @@ void hv_virtio_gpu_destroy(HvVirtioGpu *gpu) {
     if (!gpu) return;
     hv_virtio_gpu_reset(gpu);
     gpu->vio.pci.bus->dev[gpu->vio.pci.slot] = NULL;
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (gpu->neptune) {
+        gpu->vio.m->cpu_aperture_ptr=NULL;
+        gpu->vio.m->cpu_aperture_opaque=NULL;
+        hv_neptune_close(gpu->neptune);
+    }
+#endif
     free(gpu);
 }
 
@@ -484,11 +668,17 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
     for (unsigned i = 0; i < RESOURCES; i++) resources += gpu->resources[i].id != 0;
     size_t frame = (size_t)gpu->screen.rect.width * gpu->screen.rect.height * 4;
     snprintf(buffer, capacity,
-             "graphics: adapter=VirtIO-GPU-2D display=%s status=0x%02x features=0x%" PRIx64
+             "graphics: adapter=%s display=%s status=0x%02x features=0x%" PRIx64
              " scanout=%ux%u host_cpu_bytes=%zu resources=%u\n"
              "graphics_queues: control_completed=%" PRIu64 " cursor_completed=%" PRIu64
              " control_pending=%u cursor_pending=%u malformed=%" PRIu64
              " command_errors=%" PRIu64 " scanout_updates=%" PRIu64 " resets=%" PRIu64 "\n",
+             
+#ifdef WINIOS_ENABLE_NEPTUNE
+             gpu->neptune ? "Neptune-LAB" : "VirtIO-GPU-2D",
+#else
+             "VirtIO-GPU-2D",
+#endif
              gpu->screen.front ? "virtio-scanout" : "RAMFB", (unsigned)gpu->vio.status, gpu->vio.driver_features,
              gpu->screen.rect.width, gpu->screen.rect.height, gpu->allocated + 2 * frame, resources,
              gpu->completed[0], gpu->completed[1], (unsigned)gpu->pending[0], (unsigned)gpu->pending[1],

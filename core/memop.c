@@ -342,7 +342,20 @@ int hv_vmem_xfer(HvCpu *cpu, uint64_t va, void *buf, uint32_t len, int write, in
                     : inpage + len > (1ull << HV_TLB_PAGE_BITS) - HV_TLB_ADJ ? 2 : had_entry == 0 ? 3 : had_entry == 2 ? 5 : 4;
             cpu->m->stats.slow_why[why]++;
         }
-        if (hv_phys_ptr(cpu->m, pa, chunk)) {
+        void *aperture = cpu->m->cpu_aperture_ptr ?
+            cpu->m->cpu_aperture_ptr(cpu->m->cpu_aperture_opaque, pa, chunk) : NULL;
+        if (aperture) {
+            /* Feedback rings share naturally aligned scalars with renderer threads.
+               Preserve single-copy atomicity; ordered instructions fence in the caller. */
+#define APERTURE_SCALAR(T) do { T v; if (write) { memcpy(&v,b,sizeof(v)); __atomic_store_n((T *)aperture,v,__ATOMIC_RELAXED); } else { v=__atomic_load_n((T *)aperture,__ATOMIC_RELAXED); memcpy(b,&v,sizeof(v)); } } while (0)
+            if (chunk==1) APERTURE_SCALAR(uint8_t);
+            else if (chunk==2 && !((uintptr_t)aperture&1)) APERTURE_SCALAR(uint16_t);
+            else if (chunk==4 && !((uintptr_t)aperture&3)) APERTURE_SCALAR(uint32_t);
+            else if (chunk==8 && !((uintptr_t)aperture&7)) APERTURE_SCALAR(uint64_t);
+            else if (write) memcpy(aperture,b,chunk);
+            else memcpy(b,aperture,chunk);
+#undef APERTURE_SCALAR
+        } else if (hv_phys_ptr(cpu->m, pa, chunk)) {
             rc = write ? hv_phys_write(cpu->m, pa, b, chunk) : hv_phys_read(cpu->m, pa, b, chunk);
         } else {
             for (uint32_t off = 0; off < chunk && !rc; off += 8) { /* MMIO: at most 8 bytes at a time */
@@ -420,6 +433,13 @@ static int rmw_target(HvCpu *cpu, uint64_t va, uint32_t bytes, int el, uint64_t 
     if (fsc) {
         hv_raise_abort(cpu, 0, va, fsc, 1, fsc >= 0x14 && fsc <= 0x17, pc);
         return -1;
+    }
+    void *aperture = cpu->m->cpu_aperture_ptr ?
+        cpu->m->cpu_aperture_ptr(cpu->m->cpu_aperture_opaque, pa, bytes) : NULL;
+    if (aperture && !((uintptr_t)aperture & (bytes-1))) {
+        *host = aperture;
+        *mmio_pa = pa;
+        return 0;
     }
     HvRam *ram = hv_ram_lookup(cpu->m, pa);
     if (ram && ram->readonly) { /* ROM: nothing to write; treat like a device */
