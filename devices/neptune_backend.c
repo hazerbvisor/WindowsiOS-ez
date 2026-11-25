@@ -4,7 +4,9 @@
 #if defined(WINIOS_ENABLE_NEPTUNE)
 #define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include <virglrenderer.h>
+#include "fb_readback.h"
 #include "neptune_angle.h"
+#include "neptune_scanout_probe.h"
 #include "machine.h"
 #include <sys/uio.h>
 /* Pinned virgl_hw.h defines this six-u32 ABI; the installed public header forward declares it. */
@@ -43,6 +45,7 @@ typedef struct Pending {
  X(virgl_renderer_resource_attach_iov) X(virgl_renderer_resource_detach_iov) \
  X(virgl_renderer_transfer_write_iov) X(virgl_renderer_transfer_read_iov) \
  X(virgl_renderer_resource_map) X(virgl_renderer_resource_unmap) \
+ X(virgl_renderer_resource_export_blob) \
  X(virgl_renderer_resource_get_map_info) X(virgl_renderer_resource_unref) \
  X(virgl_renderer_ctx_attach_resource) X(virgl_renderer_ctx_detach_resource) \
  X(virgl_renderer_create_handle_for_scanout) X(virgl_renderer_release_handle_for_scanout)
@@ -447,6 +450,38 @@ void *hv_neptune_typed_scanout(HvNeptune *n,uint32_t resource,uint32_t width,uin
     if (!b || b->target!=2 || b->bpp!=4 || width!=b->width || height!=b->height) return NULL;
     return hv_neptune_scanout_texture(n,resource,width,height,b->format,width*4,0);
 }
+
+int hv_neptune_probe_scanout(HvNeptune *n, const HvNptScanout *scanout, unsigned index, bool *black) {
+    Blob *b = blob(n, scanout->resource);
+    if (!b || !scanout->width || !scanout->height || index >= HV_NPT_PROBE_TILES) return EINVAL;
+    HvNptProbeTile tile = hv_npt_probe_tile(scanout->width, scanout->height, index);
+    uint8_t pixels[HV_NPT_PROBE_SIDE * HV_NPT_PROBE_SIDE * 4] = {0};
+    uint32_t stride = tile.width * 4;
+    int rc;
+    if (b->bpp) {
+        if (b->target != 2 || b->bpp != 4 ||
+            b->width != scanout->width || b->height != scanout->height) return EINVAL;
+        struct virgl_box box = {tile.x, tile.y, 0, tile.width, tile.height, 1};
+        struct iovec iov = {pixels, stride * tile.height};
+        /* A distinct host iov forces the renderer to read the GL texture.
+         * Reading its attached guest backing can return stale bytes. */
+        rc = n->virgl_renderer_transfer_read_iov(b->id, 0, 0, stride, 0, &box, 0, &iov, 1);
+    } else {
+        uint32_t type = 0;
+        int fd = -1;
+        rc = n->virgl_renderer_resource_export_blob(b->id, &type, &fd);
+        if (!rc) {
+            rc = type == VIRGL_RENDERER_BLOB_FD_TYPE_SHM
+                ? hv_npt_probe_shm(fd, scanout->width, scanout->height, scanout->stride,
+                                   scanout->offset, b->bytes, tile, pixels)
+                : ENOTSUP;
+            close(fd);
+        }
+    }
+    if (!rc) (void)hv_fb_readback_measure(pixels, tile.width, tile.height, stride, black);
+    return rc;
+}
+
 unsigned hv_neptune_resource_count(HvNeptune *n,uint64_t *bytes) {
     unsigned count=0;
     if (bytes) *bytes=n?n->allocated:0;

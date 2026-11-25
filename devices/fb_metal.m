@@ -156,6 +156,10 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         readbackEpoch++;
         readbackSource = nil;
         readbackTexture = nil;
+        if (enabled) {
+            readbackSamples = readbackBlack = readbackChanges = readbackErrors = 0;
+            readbackLastError = 0;
+        }
         lastReadbackRequest = 0;
         lastNativeSubmit = 0;
     }

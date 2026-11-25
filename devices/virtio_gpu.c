@@ -2,7 +2,9 @@
 #include "virtio_gpu.h"
 #include "virtio_gpu_modes.h"
 #ifdef WINIOS_ENABLE_NEPTUNE
+#include "neptune_scanout_probe.h"
 #include "neptune_wire.h"
+#include <time.h>
 #endif
 
 #include <inttypes.h>
@@ -66,6 +68,13 @@ typedef struct NeptuneReply {
     uint32_t bytes;
     uint8_t response[24];
 } NeptuneReply;
+typedef struct ProducerProbe {
+    uint64_t next_ms;
+    unsigned attempts, black, errors;
+    int last_error;
+    uint32_t first_resource, last_resource, last_nonblack_resource;
+    bool enabled;
+} ProducerProbe;
 #endif
 
 struct HvVirtioGpu {
@@ -84,7 +93,8 @@ struct HvVirtioGpu {
     pthread_t neptune_owner;
     bool neptune_reset_pending;
     void *native_texture;
-    uint32_t native_resource, native_width, native_height;
+    HvNptScanout native;
+    ProducerProbe probe;
     NeptuneReply deferred[HV_NPT_MAX_FENCES];
     uint64_t neptune_submits, neptune_completed, neptune_fence_errors;
 #endif
@@ -142,7 +152,7 @@ static void clear_scanout(HvVirtioGpu *gpu) {
 #ifdef WINIOS_ENABLE_NEPTUNE
     if (gpu->native_texture) hv_neptune_scanout_release(gpu->neptune,gpu->native_texture);
     gpu->native_texture=NULL;
-    gpu->native_resource=gpu->native_width=gpu->native_height=0;
+    gpu->native=(HvNptScanout){0};
 #endif
     free(gpu->screen.front);
     gpu->screen = (Scanout){0};
@@ -487,8 +497,8 @@ static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
         if (!tex) { response.type=ERR_UNSPEC; goto out; }
         clear_scanout(gpu);
         gpu->native_texture=tex;
-        gpu->native_resource=body[5];
-        gpu->native_width=body[2]; gpu->native_height=body[3];
+        gpu->native=(HvNptScanout){.resource=body[5], .width=body[2], .height=body[3],
+                                  .stride=body[2]*4};
         hv_fb_display_set_native(gpu->fb,tex,body[2],body[3]);
         gpu->publishes++;
         response.type=OK_NODATA;
@@ -505,17 +515,17 @@ static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem
         if (!tex) { response.type=ERR_UNSPEC; goto out; }
         clear_scanout(gpu);
         gpu->native_texture=tex;
-        gpu->native_resource=body[5];
-        gpu->native_width=body[6]; gpu->native_height=body[7];
+        gpu->native=(HvNptScanout){.resource=body[5], .width=body[6], .height=body[7],
+                                  .stride=body[10], .offset=body[14], .blob_command=true};
         hv_fb_display_set_native(gpu->fb,tex,body[6],body[7]);
         gpu->publishes++;
         response.type=OK_NODATA;
     } else if (hdr->type==RESOURCE_FLUSH) {
         if (got!=sizeof(Header)+24 ||
             hv_virtq_read(&gpu->vio,elem,sizeof(Header),body,24)!=24) goto out;
-        if (body[4]!=gpu->native_resource || !gpu->native_texture) { response.type=ERR_RESOURCE; goto out; }
-        if (!body[2] || !body[3] || body[0]>=gpu->native_width || body[1]>=gpu->native_height ||
-            body[2]>gpu->native_width-body[0] || body[3]>gpu->native_height-body[1]) goto out;
+        if (body[4]!=gpu->native.resource || !gpu->native_texture) { response.type=ERR_RESOURCE; goto out; }
+        if (!body[2] || !body[3] || body[0]>=gpu->native.width || body[1]>=gpu->native.height ||
+            body[2]>gpu->native.width-body[0] || body[3]>gpu->native.height-body[1]) goto out;
         hv_fb_display_native_dirty(gpu->fb);
         gpu->publishes++;
         response.type=OK_NODATA;
@@ -600,7 +610,7 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
     if (hdr.type==SET_SCANOUT) {
         uint32_t id=0;
         if (hv_virtq_read(v,elem,sizeof(hdr)+20,&id,4)==4 &&
-            ((id && hv_neptune_blob_exists(gpu->neptune,id)) || (!id && gpu->native_resource))) {
+            ((id && hv_neptune_blob_exists(gpu->neptune,id)) || (!id && gpu->native.resource))) {
             *written=neptune_scanout_command(gpu,elem,&hdr); return true;
         }
     }
@@ -608,9 +618,9 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
         *written=neptune_scanout_command(gpu,elem,&hdr);
         return true;
     }
-    if (hdr.type==RESOURCE_FLUSH && gpu->native_resource) {
+    if (hdr.type==RESOURCE_FLUSH && gpu->native.resource) {
         uint32_t id=0;
-        if (hv_virtq_read(v,elem,sizeof(hdr)+16,&id,4)==4 && id==gpu->native_resource) {
+        if (hv_virtq_read(v,elem,sizeof(hdr)+16,&id,4)==4 && id==gpu->native.resource) {
             *written=neptune_scanout_command(gpu,elem,&hdr);
             return true;
         }
@@ -677,9 +687,9 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
     } else if (n) {
         uint32_t type=0; memcpy(&type,reply,4);
         record_error(gpu,&hdr,type,length);
-        if (type==OK_NODATA && hdr.type==RESOURCE_UNREF && gpu->native_resource) {
+        if (type==OK_NODATA && hdr.type==RESOURCE_UNREF && gpu->native.resource) {
             uint32_t id=0;
-            if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4 && id==gpu->native_resource) clear_scanout(gpu);
+            if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4 && id==gpu->native.resource) clear_scanout(gpu);
         }
         *written=hv_virtq_write(v,elem,0,reply,(uint32_t)n);
     }
@@ -717,7 +727,41 @@ static void neptune_retire(HvVirtioGpu *gpu) {
     }
     if (interrupt) hv_virtio_queue_interrupt(&gpu->vio,0);
 }
+
+static void probe_producer(HvVirtioGpu *gpu) {
+    ProducerProbe *p = &gpu->probe;
+    if (!p->enabled || !gpu->native_texture || gpu->pending[0] ||
+        p->attempts >= HV_NPT_PROBE_TILES) return;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) return;
+    uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    if (now_ms < p->next_ms) return;
+    for (size_t i = 0; i < HV_NPT_MAX_FENCES; ++i)
+        if (gpu->deferred[i].ticket) return;
+
+    /* This probe can synchronize with GLES. Keep it off the ordinary
+     * execution path and sample only an idle control queue. */
+    p->next_ms = now_ms + 1000;
+    bool black;
+    p->last_error = hv_neptune_probe_scanout(gpu->neptune, &gpu->native, p->attempts, &black);
+    if (!p->attempts) p->first_resource = gpu->native.resource;
+    p->last_resource = gpu->native.resource;
+    p->attempts++;
+    if (p->last_error) p->errors++;
+    else if (black) p->black++;
+    else p->last_nonblack_resource = gpu->native.resource;
+}
 #endif
+
+void hv_virtio_gpu_set_cpu_readback(HvVirtioGpu *gpu, bool enabled) {
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (!gpu || gpu->probe.enabled == enabled) return;
+    if (enabled) gpu->probe = (ProducerProbe){0};
+    gpu->probe.enabled = enabled;
+#else
+    (void)gpu; (void)enabled;
+#endif
+}
 
 void hv_virtio_gpu_start_neptune(HvVirtioGpu *gpu,int ncpus) {
 #ifdef WINIOS_ENABLE_NEPTUNE
@@ -803,6 +847,9 @@ void hv_virtio_gpu_poll(HvVirtioGpu *gpu) {
 #endif
     for (int q = 0; q < QUEUES && !(gpu->vio.status & 64); q++)
         if (gpu->pending[q]) process_queue(&gpu->vio, q);
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (!(gpu->vio.status & 0xc0)) probe_producer(gpu);
+#endif
 }
 
 static void reset_resources(HvVirtioGpu *gpu) {
@@ -890,7 +937,7 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
     const char *display=gpu->screen.front ? "virtio-scanout" : "RAMFB";
     uint32_t width=gpu->screen.rect.width,height=gpu->screen.rect.height;
 #ifdef WINIOS_ENABLE_NEPTUNE
-    if (gpu->native_texture) { display="Metal-native"; width=gpu->native_width; height=gpu->native_height; }
+    if (gpu->native_texture) { display="Metal-native"; width=gpu->native.width; height=gpu->native.height; }
 #endif
     snprintf(buffer, capacity,
              "graphics: adapter=%s display=%s status=0x%02x features=0x%" PRIx64
@@ -915,8 +962,18 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
 #ifdef WINIOS_ENABLE_NEPTUNE
     if (gpu->neptune && used<capacity) {
         uint64_t bytes=0; unsigned count=hv_neptune_resource_count(gpu->neptune,&bytes);
-        int n=snprintf(buffer+used,capacity-used,"neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 " reply_errors=%" PRIu64 "\n",
-            count,bytes,gpu->neptune_submits,gpu->neptune_completed,gpu->neptune_fence_errors);
+        const HvNptScanout *scanout = &gpu->native;
+        const ProducerProbe *p = &gpu->probe;
+        const char *command = !scanout->resource ? "none" : scanout->blob_command ? "blob" : "typed";
+        int n=snprintf(buffer+used,capacity-used,
+            "neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 " reply_errors=%" PRIu64 "\n"
+            "scanout_producer: resource=%u command=%s stride=%u offset=%u enabled=%u"
+            " attempts=%u black_tiles=%u nonblack_tiles=%u errors=%u last_rc=%d"
+            " first_resource=%u last_resource=%u last_nonblack_resource=%u\n",
+            count,bytes,gpu->neptune_submits,gpu->neptune_completed,gpu->neptune_fence_errors,
+            scanout->resource,command,scanout->stride,scanout->offset,(unsigned)p->enabled,
+            p->attempts,p->black,p->attempts-p->black-p->errors,p->errors,p->last_error,
+            p->first_resource,p->last_resource,p->last_nonblack_resource);
         if (n>0) used+=(size_t)n;
         if (used<capacity) {
             hv_neptune_context_diagnostics(gpu->neptune,buffer+used,capacity-used);

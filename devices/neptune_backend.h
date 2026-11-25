@@ -55,6 +55,12 @@ int hv_neptune_reset(HvNeptune *n);
 /* Retained Metal texture handle, released through the renderer before its teardown. */
 void *hv_neptune_scanout_texture(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height,uint32_t format,uint32_t stride,uint32_t offset);
 void *hv_neptune_typed_scanout(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height);
+typedef struct HvNptScanout {
+    uint32_t resource, width, height, stride, offset;
+    bool blob_command;
+} HvNptScanout;
+/* Aggregate-only diagnostic. Returns an errno or a renderer status on failure. */
+int hv_neptune_probe_scanout(HvNeptune *n, const HvNptScanout *scanout, unsigned index, bool *black);
 unsigned hv_neptune_resource_count(HvNeptune *n,uint64_t *bytes);
 void hv_neptune_context_diagnostics(HvNeptune *n,char *buffer,size_t capacity);
 void hv_neptune_scanout_release(HvNeptune *n,void *texture);

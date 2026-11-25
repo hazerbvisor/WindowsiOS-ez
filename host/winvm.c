@@ -145,7 +145,11 @@ void hv_winvm_set_presentation_rate(unsigned fps) {
 
 void hv_winvm_set_cpu_readback(int enabled) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
-    if (fb) hv_fb_metal_set_cpu_readback(fb,enabled!=0);
+    if (!fb) return;
+    hv_fb_metal_set_cpu_readback(fb, enabled != 0);
+    hv_dev_lock(&m);
+    hv_virtio_gpu_set_cpu_readback(board.gpu, enabled != 0);
+    hv_dev_unlock(&m);
 }
 
 int hv_winvm_display_size(uint32_t *w, uint32_t *h) {
@@ -268,6 +272,9 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     if (board.hda && c->enable_sound) hv_audio_attach_hda(board.hda);
     board.poll = board_poll;
 
+    hv_dev_lock(&m);
+    *stopped_graphics = '\0';
+    hv_dev_unlock(&m);
     os_unfair_lock_lock(&display_lock);
     if (display_layer_set && board.fb) hv_fb_metal_set_layer(board.fb, (void *)display_layer);
     atomic_store_explicit(&display_fb, board.fb, memory_order_release);

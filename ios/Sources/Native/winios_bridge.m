@@ -612,6 +612,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         hv_winvm_set_display_layer((__bridge void *)layer);
     }
 
+    _scanoutCPUReadback = NO;
     _vmRunning = YES;
     _bootStartTime = CFAbsoluteTimeGetCurrent();
     _diagTickCount = 0;

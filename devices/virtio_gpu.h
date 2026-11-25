@@ -11,6 +11,7 @@ typedef struct HvVirtioGpu HvVirtioGpu;
 HvVirtioGpu *hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb);
 /* Called on CPU0 before guest execution. Development build only; no implicit activation. */
 void hv_virtio_gpu_start_neptune(HvVirtioGpu *gpu, int ncpus);
+void hv_virtio_gpu_set_cpu_readback(HvVirtioGpu *gpu, bool enabled);
 void hv_virtio_gpu_poll(HvVirtioGpu *gpu);
 void hv_virtio_gpu_reset(HvVirtioGpu *gpu);
 void hv_virtio_gpu_destroy(HvVirtioGpu *gpu);

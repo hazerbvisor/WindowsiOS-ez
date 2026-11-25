@@ -1,8 +1,6 @@
-name: MetalGPU context-sharing and readback IPA
+name: MetalGPU producer and Metal readback IPA
 on:
-  push:
-    branches: [fix/metalgpu-black-screen]
-    paths: [.github/workflows/one-off-metalgpu.yml]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -65,6 +63,9 @@ jobs:
           "$RUNNER_TEMP/gpu-modes"
           cc -std=c11 -Wall -Wextra -Werror tests/test_fb_readback.c -o "$RUNNER_TEMP/fb-readback"
           "$RUNNER_TEMP/fb-readback"
+          cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+            tests/test_neptune_scanout_probe.c -o "$RUNNER_TEMP/neptune-scanout-probe"
+          "$RUNNER_TEMP/neptune-scanout-probe"
           cc -std=c11 -Wall -Wextra -Werror -I"$WINIOS_GPU_PREBUILT_PREFIX/include" \
             tests/test_neptune_angle.c devices/neptune_angle.c -o "$RUNNER_TEMP/neptune-angle"
           "$RUNNER_TEMP/neptune-angle"
@@ -73,7 +74,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-Readback-unsigned
+          name: WindowsiOS-ez-MetalGPU-ProducerProbe-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7
