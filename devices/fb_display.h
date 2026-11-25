@@ -25,6 +25,7 @@ typedef struct HvFbDisplay {
     uint32_t stride;
     uint32_t fourcc; /* DRM fourcc, e.g. XR24 / AR24 (32-bit BGRX) */
     int active;
+    bool prefer_ramfb;
     uint8_t *scanout;
     uint32_t scanout_width, scanout_height;
     uint64_t scanout_serial;
@@ -36,6 +37,15 @@ typedef struct HvFbDisplay {
     void *metal;
 } HvFbDisplay;
 
+typedef enum HvFbSource {
+    HV_FB_NONE, HV_FB_RAMFB, HV_FB_VIRTIO, HV_FB_NATIVE,
+} HvFbSource;
+
+/* The caller holds fb->mu. Keep dimensions and pixels on the same source. */
+HvFbSource hv_fb_display_source_locked(const HvFbDisplay *fb);
+void hv_fb_display_prefer_ramfb(HvFbDisplay *fb, bool prefer);
+bool hv_fb_display_prefers_ramfb(HvFbDisplay *fb);
+void hv_fb_display_diagnostics(HvFbDisplay *fb, char *buffer, size_t capacity);
 HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg);
 /* A successful borrow holds the display lock. Release after copying or uploading pixels. */
 int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h,

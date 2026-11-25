@@ -213,6 +213,37 @@ static uint64_t check_frame(HvFbDisplay *fb, uint32_t w, uint32_t h, const uint8
     return serial;
 }
 
+static void check_live_recovery(HvFbDisplay *fb, const uint32_t config[7]) {
+    uint32_t width, height, stride;
+    const uint8_t *pixels;
+    char diagnostics[160];
+    int first_native, replacement;
+    hv_fb_display_set_native(fb, &first_native, 800, 600);
+    assert(!hv_fb_display_prefers_ramfb(fb));
+    assert(hv_fb_display_acquire_frame(fb, &pixels, &width, &height, &stride, NULL) == -1);
+    hv_fb_display_prefer_ramfb(fb, true);
+    assert(hv_fb_display_get_size(fb, &width, &height) == 0 && width == 800 && height == 600);
+
+    ramfb_write(ramfb_context, (const uint8_t *)config, 28);
+    assert(hv_fb_display_prefers_ramfb(fb));
+    assert(hv_fb_display_get_size(fb, &width, &height) == 0 && width == 64 && height == 64);
+    uint8_t ramfb_row[256] = {17, 42, 63, 0};
+    memcpy(memory + 0xc000, ramfb_row, sizeof ramfb_row);
+    assert(check_frame(fb, 64, 64, ramfb_row) == 0);
+    hv_fb_display_diagnostics(fb, diagnostics, sizeof diagnostics);
+    assert(strcmp(diagnostics, "display_source: active=RAMFB preference=RAMFB ramfb=64x64 native=800x600\n") == 0);
+
+    hv_fb_display_set_native(fb, &replacement, 1280, 720);
+    hv_fb_display_native_dirty(fb);
+    assert(check_frame(fb, 64, 64, ramfb_row) == 0);
+    hv_fb_display_prefer_ramfb(fb, false);
+    assert(hv_fb_display_get_size(fb, &width, &height) == 0 && width == 1280 && height == 720);
+    assert(hv_fb_display_acquire_frame(fb, &pixels, &width, &height, &stride, NULL) == -1);
+    hv_fb_display_set_scanout(fb, NULL, 0, 0);
+    assert(check_frame(fb, 64, 64, ramfb_row) == 0);
+    memset(memory + 0xc000, 0, sizeof ramfb_row);
+}
+
 static void display_commands(HvFbDisplay *fb) {
     Command cmd = {.header={0x100, 1, 0xabcd123458ull, 0, 0}};
     Header result = request(&cmd, sizeof(Header), 408, 408);
@@ -247,7 +278,10 @@ static void display_commands(HvFbDisplay *fb) {
     memory[DATA0] = 33;
     assert(action(0x105, (uint32_t[8]){0,0,1,1,0,0,1}) == OK);
     assert(check_frame(fb, 2, 2, (uint8_t[]){3,2,1,255,6,5,4,255}) == serial);
+    hv_fb_display_prefer_ramfb(fb, true);
     assert(action(0x104, (uint32_t[8]){0,0,1,1,1}) == OK);
+    assert(check_frame(fb, 64, 64, (uint8_t[256]){0}) == 0);
+    hv_fb_display_prefer_ramfb(fb, false);
     assert(check_frame(fb, 2, 2, (uint8_t[]){3,2,33,255,6,5,4,255}) != serial);
 
     assert(action(0x101, (uint32_t[8]){2,1,64,64}) == OK);
@@ -336,7 +370,7 @@ int main(void) {
     HvFbDisplay *fb = hv_fb_display_create(&machine, &fw);
     const uint32_t config[] = {0, __builtin_bswap32(BASE + 0xc000), __builtin_bswap32(0x34325258),
                                0, __builtin_bswap32(64), __builtin_bswap32(64), __builtin_bswap32(256)};
-    ramfb_write(ramfb_context, (const uint8_t *)config, sizeof config);
+    check_live_recovery(fb, config);
     assert(read_ecam(0, 4) == UINT32_MAX);
     HvVirtioGpu *gpu = hv_virtio_gpu_create(&machine, bus, fb);
     assert(gpu);
@@ -385,6 +419,6 @@ int main(void) {
     pthread_mutex_destroy(&fb->mu);
     free(fb);
     free(bus);
-    puts("VirtIO-GPU control and cursor queues, scanout, fencing, interrupts, bounds and reset passed");
+    puts("VirtIO-GPU control and cursor queues, scanout, live RAMFB recovery, fencing, interrupts, bounds and reset passed");
     return 0;
 }

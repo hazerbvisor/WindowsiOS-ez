@@ -1,4 +1,4 @@
-name: MetalGPU producer and Metal readback IPA
+name: MetalGPU live display recovery IPA
 on:
   workflow_dispatch:
 permissions:
@@ -74,7 +74,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-ProducerProbe-unsigned
+          name: WindowsiOS-ez-MetalGPU-DisplayRecovery-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

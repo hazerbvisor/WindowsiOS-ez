@@ -192,7 +192,8 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         os_unfair_lock_lock(&p->lock);
         p->readbackInFlight = NO;
         pthread_mutex_lock(&p->fb->mu);
-        BOOL matching = p->fb->native_texture == (__bridge void *)source;
+        BOOL matching = hv_fb_display_source_locked(p->fb) == HV_FB_NATIVE &&
+                        p->fb->native_texture == (__bridge void *)source;
         pthread_mutex_unlock(&p->fb->mu);
         if (p->readbackEnabled && p->readbackEpoch == epoch && matching) {
             if (finished.status == MTLCommandBufferStatusCompleted) {
@@ -252,7 +253,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
          * through GPU execution even when the guest switches scanouts. */
         id<MTLTexture> native = nil;
         pthread_mutex_lock(&fb->mu);
-        if (fb->native_texture) {
+        if (hv_fb_display_source_locked(fb) == HV_FB_NATIVE) {
             native=(__bridge id<MTLTexture>)fb->native_texture;
             w=fb->native_width; h=fb->native_height;
             scanoutSerial=fb->scanout_serial;

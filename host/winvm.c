@@ -152,6 +152,14 @@ void hv_winvm_set_cpu_readback(int enabled) {
     hv_dev_unlock(&m);
 }
 
+void hv_winvm_prefer_ramfb(bool prefer) {
+    hv_fb_display_prefer_ramfb(atomic_load_explicit(&display_fb, memory_order_acquire), prefer);
+}
+
+bool hv_winvm_prefers_ramfb(void) {
+    return hv_fb_display_prefers_ramfb(atomic_load_explicit(&display_fb, memory_order_acquire));
+}
+
 int hv_winvm_display_size(uint32_t *w, uint32_t *h) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     if (!fb) return -1;
@@ -369,6 +377,10 @@ void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity) {
     if (*stopped_graphics) snprintf(buffer, capacity, "graphics_last_session:\n%s", stopped_graphics);
     else hv_virtio_gpu_diagnostics(board.gpu, buffer, capacity);
     size_t used=strlen(buffer);
+    if (used<capacity) {
+        hv_fb_display_diagnostics(board.fb, buffer+used, capacity-used);
+        used+=strlen(buffer+used);
+    }
     if (used<capacity) hv_fb_metal_diagnostics(board.fb,buffer+used,capacity-used);
     hv_dev_unlock(&m);
 }

@@ -911,6 +911,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     hv_winvm_set_cpu_readback(enabled);
 }
 
+- (BOOL)preferRAMFramebuffer { return hv_winvm_prefers_ramfb(); }
+- (void)setPreferRAMFramebuffer:(BOOL)prefer { hv_winvm_prefer_ramfb(prefer); }
+
 - (void)stopVM {
     if (!_vmRunning) return;
     hv_winvm_stop();

@@ -366,6 +366,7 @@ private struct SessionDetails: View {
     let openWindowsSettings: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var cpuReadback = WinIOSBridge.shared.scanoutCPUReadback
+    @State private var preferFramebuffer = WinIOSBridge.shared.preferRAMFramebuffer
 
     var body: some View {
         NavigationStack {
@@ -395,6 +396,14 @@ private struct SessionDetails: View {
                     Section("Experimental graphics") {
                         NavigationLink("Install graphics driver") { MetalGPUDriverView() }
                         if vm.isVMRunning && WinIOSBridge.shared.metalGPULabActive {
+                            Toggle("Show RAM framebuffer", isOn: $preferFramebuffer)
+                                .onChange(of: preferFramebuffer) { _, preferred in
+                                    WinIOSBridge.shared.preferRAMFramebuffer = preferred
+                                    WinIOSBridge.shared.captureDiagnostics()
+                                }
+                            Text("Use the recovery display if the MetalGPU screen goes black. Windows keeps running and you can switch back here.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                             Toggle("CPU readback diagnostics", isOn: $cpuReadback)
                                 .onChange(of: cpuReadback) { _, enabled in
                                     WinIOSBridge.shared.scanoutCPUReadback = enabled

@@ -74,12 +74,52 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
+HvFbSource hv_fb_display_source_locked(const HvFbDisplay *fb) {
+    bool ramfb_ready = fb->active && fb->fb_host && fb->width && fb->height;
+    if (fb->prefer_ramfb && ramfb_ready) return HV_FB_RAMFB;
+    if (fb->native_texture) return HV_FB_NATIVE;
+    if (fb->scanout) return HV_FB_VIRTIO;
+    return ramfb_ready ? HV_FB_RAMFB : HV_FB_NONE;
+}
+
+void hv_fb_display_prefer_ramfb(HvFbDisplay *fb, bool prefer) {
+    if (!fb) return;
+    pthread_mutex_lock(&fb->mu);
+    fb->prefer_ramfb = prefer;
+    pthread_mutex_unlock(&fb->mu);
+}
+
+bool hv_fb_display_prefers_ramfb(HvFbDisplay *fb) {
+    if (!fb) return false;
+    pthread_mutex_lock(&fb->mu);
+    bool prefer = fb->prefer_ramfb;
+    pthread_mutex_unlock(&fb->mu);
+    return prefer;
+}
+
+void hv_fb_display_diagnostics(HvFbDisplay *fb, char *buffer, size_t capacity) {
+    if (!capacity) return;
+    *buffer = '\0';
+    if (!fb) return;
+    static const char *const names[] = {
+        [HV_FB_NONE] = "none", [HV_FB_RAMFB] = "RAMFB",
+        [HV_FB_VIRTIO] = "VirtIO-2D", [HV_FB_NATIVE] = "Metal-native",
+    };
+    pthread_mutex_lock(&fb->mu);
+    HvFbSource source = hv_fb_display_source_locked(fb);
+    snprintf(buffer, capacity, "display_source: active=%s preference=%s ramfb=%ux%u native=%ux%u\n",
+             names[source], fb->prefer_ramfb ? "RAMFB" : "auto",
+             fb->active ? fb->width : 0, fb->active ? fb->height : 0,
+             fb->native_width, fb->native_height);
+    pthread_mutex_unlock(&fb->mu);
+}
+
 int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint64_t *scanout_serial) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);
-    if (fb->native_texture) { pthread_mutex_unlock(&fb->mu); return -1; }
-    if (fb->scanout) {
+    HvFbSource source = hv_fb_display_source_locked(fb);
+    if (source == HV_FB_VIRTIO) {
         *pixels = fb->scanout;
         *w = fb->scanout_width;
         *h = fb->scanout_height;
@@ -87,7 +127,7 @@ int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_
         if (scanout_serial) *scanout_serial = fb->scanout_serial;
         return 0;
     }
-    if (!fb->active || !fb->fb_host || !fb->width || !fb->height) {
+    if (source != HV_FB_RAMFB) {
         pthread_mutex_unlock(&fb->mu);
         return -1;
     }
@@ -120,9 +160,12 @@ int hv_fb_display_get_size(HvFbDisplay *fb,uint32_t *w,uint32_t *h) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);
     uint32_t width=0,height=0;
-    if (fb->native_texture) { width=fb->native_width; height=fb->native_height; }
-    else if (fb->scanout) { width=fb->scanout_width; height=fb->scanout_height; }
-    else if (fb->active && fb->fb_host) { width=fb->width; height=fb->height; }
+    switch (hv_fb_display_source_locked(fb)) {
+    case HV_FB_NATIVE: width=fb->native_width; height=fb->native_height; break;
+    case HV_FB_VIRTIO: width=fb->scanout_width; height=fb->scanout_height; break;
+    case HV_FB_RAMFB: width=fb->width; height=fb->height; break;
+    case HV_FB_NONE: break;
+    }
     pthread_mutex_unlock(&fb->mu);
     if (!width || !height) return -1;
     if (w) *w=width;

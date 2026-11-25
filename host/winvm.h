@@ -41,6 +41,8 @@ void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity);
 void hv_winvm_set_display_layer(void *ca_metal_layer);
 void hv_winvm_set_presentation_rate(unsigned fps);
 void hv_winvm_set_cpu_readback(int enabled);
+void hv_winvm_prefer_ramfb(bool prefer);
+bool hv_winvm_prefers_ramfb(void);
 int hv_winvm_display_size(uint32_t *w, uint32_t *h);
 uint64_t hv_winvm_display_frames(void);
 int hv_winvm_save_png(const char *path);
