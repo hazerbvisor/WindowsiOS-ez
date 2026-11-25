@@ -31,6 +31,11 @@ int hv_neptune_context_create(HvNeptune *n, uint32_t id, const char *name, size_
 int hv_neptune_context_create_cap(HvNeptune *n,uint32_t id,uint32_t capset,const char *name,size_t length);
 int hv_neptune_capset_id(HvNeptune *n,uint32_t id,void *out,size_t capacity,uint32_t *version,uint32_t *size);
 int hv_neptune_create_3d(HvNeptune *n,const uint32_t args[11]);
+typedef struct HvNptBacking { uint64_t pa; uint32_t len; } HvNptBacking;
+typedef struct HvMachine HvMachine;
+int hv_neptune_attach_backing(HvNeptune *n,HvMachine *m,uint32_t id,const HvNptBacking *entries,uint32_t count);
+int hv_neptune_detach_backing(HvNeptune *n,uint32_t id);
+int hv_neptune_transfer(HvNeptune *n,HvMachine *m,uint32_t id,uint32_t context,const uint32_t box[6],uint64_t offset,uint32_t level,uint32_t stride,uint32_t layer_stride,bool to_host);
 int hv_neptune_fence_submit_legacy(HvNeptune *n,uint32_t context,uint64_t guest_id,uint64_t *ticket);
 int hv_neptune_context_destroy(HvNeptune *n, uint32_t id);
 int hv_neptune_submit(HvNeptune *n, uint32_t context, const void *command, size_t bytes);

@@ -5,6 +5,10 @@
 #define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include <virglrenderer.h>
 #include "neptune_angle.h"
+#include "machine.h"
+#include <sys/uio.h>
+/* Pinned virgl_hw.h defines this six-u32 ABI; the installed public header forward declares it. */
+struct virgl_box { uint32_t x,y,z,w,h,d; };
 #include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
@@ -16,6 +20,11 @@ typedef struct Blob {
     uint64_t bytes, offset;
     void *map;
     uint64_t mapped_bytes;
+    uint32_t width,height,bpp,target,entry_count;
+    HvNptBacking *entries;
+    uint8_t *backing;
+    uint64_t backing_bytes;
+    struct iovec iov;
 } Blob;
 typedef struct Pending {
     HvNeptuneFence fence;
@@ -29,6 +38,8 @@ typedef struct Pending {
  X(virgl_renderer_submit_cmd) X(virgl_renderer_context_create_fence) \
  X(virgl_renderer_context_poll) X(virgl_renderer_resource_create_blob) \
  X(virgl_renderer_create_fence) X(virgl_renderer_poll) X(virgl_renderer_resource_create) \
+ X(virgl_renderer_resource_attach_iov) X(virgl_renderer_resource_detach_iov) \
+ X(virgl_renderer_transfer_write_iov) X(virgl_renderer_transfer_read_iov) \
  X(virgl_renderer_resource_map) X(virgl_renderer_resource_unmap) \
  X(virgl_renderer_resource_get_map_info) X(virgl_renderer_resource_unref) \
  X(virgl_renderer_ctx_attach_resource) X(virgl_renderer_ctx_detach_resource) \
@@ -216,10 +227,12 @@ int hv_neptune_submit(HvNeptune *n,uint32_t context,const void *command,size_t b
 /* Typed shadow textures use the same resource namespace and conservative
  * allocation accounting. Initial candidate supports single-level 2D only. */
 int hv_neptune_create_3d(HvNeptune *n,const uint32_t a[11]) {
-    if (!n || !a || !a[0] || blob(n,a[0]) || a[1]!=2 ||
-        !a[4] || !a[5] || a[4]>4096 || a[5]>4096 ||
-        a[6]!=1 || a[7]!=1 || a[8]!=0 || a[9]>1 || (a[10]&~1u)) return -1;
-    uint64_t bytes=(uint64_t)a[4]*a[5]*16;
+    if (!n || !a || !a[0] || a[0]>INT32_MAX || blob(n,a[0]) || (a[1]!=0 && a[1]!=2) ||
+        !a[4] || !a[5] || a[6]!=1 || a[7]!=1 || a[8]!=0 || a[9]>1 || (a[10]&~1u)) return -1;
+    uint32_t bpp=0;
+    if (a[1]==0) { if (a[5]!=1 || a[4]>(32u<<20)) return -1; bpp=1; }
+    else { if (a[4]>4096 || a[5]>4096 || (a[2]!=1 && a[2]!=2 && a[2]!=67 && a[2]!=134)) return -1; bpp=4; }
+    uint64_t bytes=(uint64_t)a[4]*a[5]*(a[1]==0?1:16);
     if (bytes>HV_NPT_BLOB_BUDGET-n->allocated) return -1;
     for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (!n->blobs[i].id) {
         struct virgl_renderer_resource_create_args args={
@@ -227,7 +240,7 @@ int hv_neptune_create_3d(HvNeptune *n,const uint32_t a[11]) {
             .height=a[5],.depth=a[6],.array_size=a[7],.last_level=a[8],.nr_samples=a[9],.flags=a[10]
         };
         if (n->virgl_renderer_resource_create(&args,NULL,0)) return -1;
-        n->blobs[i]=(Blob){.id=a[0],.bytes=bytes};
+        n->blobs[i]=(Blob){.id=a[0],.bytes=bytes,.width=a[4],.height=a[5],.bpp=bpp,.target=a[1]};
         n->allocated+=bytes;
         return 0;
     }
@@ -286,9 +299,74 @@ int hv_neptune_blob_unmap(HvNeptune *n,uint32_t resource) {
     return n->virgl_renderer_resource_unmap(resource) ? -1 : 0;
 }
 
+/* Use host-owned bounce backing rather than exposing arbitrary guest RAM to
+ * asynchronous renderer writes. Synchronize explicit transfers only. */
+static int sync_backing(Blob *b,HvMachine *m,bool to_host) {
+    uint64_t offset=0;
+    for (uint32_t i=0;i<b->entry_count;++i) {
+        HvNptBacking *e=&b->entries[i];
+        HvRam *r=hv_ram_lookup(m,e->pa);
+        if (!r || r->readonly || e->len>r->size-(e->pa-r->pa)) return -1;
+        if (to_host) memcpy(b->backing+offset,r->host+(e->pa-r->pa),e->len);
+        else {
+            hv_dma_written(m,e->pa,e->len);
+            memcpy(r->host+(e->pa-r->pa),b->backing+offset,e->len);
+        }
+        offset+=e->len;
+    }
+    return 0;
+}
+int hv_neptune_attach_backing(HvNeptune *n,HvMachine *m,uint32_t id,const HvNptBacking *entries,uint32_t count) {
+    Blob *b=n?blob(n,id):NULL;
+    if (!b || !b->bpp || b->backing || !entries || !count || count>8192) return -1;
+    uint64_t total=0;
+    for (uint32_t i=0;i<count;++i) {
+        HvRam *r=hv_ram_lookup(m,entries[i].pa);
+        if (!entries[i].len || !r || r->readonly || entries[i].len>r->size-(entries[i].pa-r->pa) ||
+            entries[i].len>HV_NPT_BLOB_BUDGET-n->allocated-total) return -1;
+        total+=entries[i].len;
+    }
+    if (total<(uint64_t)b->width*b->height*b->bpp || total>(64u<<20)) return -1;
+    b->entries=malloc(count*sizeof(*entries)); b->backing=malloc((size_t)total);
+    if (!b->entries || !b->backing) goto fail;
+    memcpy(b->entries,entries,count*sizeof(*entries));
+    b->entry_count=count; b->backing_bytes=total;
+    b->iov=(struct iovec){.iov_base=b->backing,.iov_len=(size_t)total};
+    if (sync_backing(b,m,true) || n->virgl_renderer_resource_attach_iov((int)id,&b->iov,1)) goto fail;
+    n->allocated+=total; return 0;
+fail:
+    free(b->entries); free(b->backing); b->entries=NULL; b->backing=NULL;
+    b->entry_count=0; b->backing_bytes=0; b->iov=(struct iovec){0}; return -1;
+}
+int hv_neptune_detach_backing(HvNeptune *n,uint32_t id) {
+    Blob *b=n?blob(n,id):NULL;
+    if (!b || !b->backing) return -1;
+    n->virgl_renderer_resource_detach_iov((int)id,NULL,NULL);
+    n->allocated-=b->backing_bytes;
+    free(b->entries); free(b->backing); b->entries=NULL; b->backing=NULL;
+    b->entry_count=0; b->backing_bytes=0; b->iov=(struct iovec){0}; return 0;
+}
+int hv_neptune_transfer(HvNeptune *n,HvMachine *m,uint32_t id,uint32_t context,const uint32_t a[6],uint64_t offset,uint32_t level,uint32_t stride,uint32_t layer_stride,bool to_host) {
+    Blob *b=n?blob(n,id):NULL;
+    if (!b || !b->backing || !a || level || (context && context_slot(n,context)<0) ||
+        a[2] || a[5]!=1 || !a[3] || !a[4] || a[0]>=b->width || a[1]>=b->height ||
+        a[3]>b->width-a[0] || a[4]>b->height-a[1]) return -1;
+    uint64_t row=(uint64_t)a[3]*b->bpp;
+    if (!stride) stride=b->width*b->bpp;
+    if (stride<row || offset>=b->backing_bytes || (uint64_t)stride*(a[4]-1)+row>b->backing_bytes-offset) return -1;
+    if (sync_backing(b,m,true)) return -1;
+    struct virgl_box box={a[0],a[1],a[2],a[3],a[4],a[5]};
+    int ret=to_host?n->virgl_renderer_transfer_write_iov(id,context,0,stride,layer_stride,&box,offset,&b->iov,1):
+        n->virgl_renderer_transfer_read_iov(id,context,0,stride,layer_stride,&box,offset,&b->iov,1);
+    if (ret) return -1;
+    if (!to_host) return sync_backing(b,m,false);
+    return 0;
+}
+
 int hv_neptune_blob_destroy(HvNeptune *n,uint32_t resource) {
     Blob *b=n?blob(n,resource):NULL;
     if (!b || b->map) return -1;
+    if (b->backing) (void)hv_neptune_detach_backing(n,resource);
     n->virgl_renderer_resource_unref(resource);
     n->allocated-=b->bytes; *b=(Blob){0};
     return 0;
@@ -328,6 +406,7 @@ int hv_neptune_reset(HvNeptune *n) {
     if (!n || !n->initialized) return -1;
     for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (n->blobs[i].id) {
         if (n->blobs[i].map) (void)hv_neptune_blob_unmap(n,n->blobs[i].id);
+        if (n->blobs[i].backing) (void)hv_neptune_detach_backing(n,n->blobs[i].id);
         n->virgl_renderer_resource_unref(n->blobs[i].id);
     }
     n->virgl_renderer_reset();
@@ -424,7 +503,8 @@ void hv_neptune_close(HvNeptune *n) {
     if (n->initialized) {
         for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (n->blobs[i].id) {
             if (n->blobs[i].map) (void)hv_neptune_blob_unmap(n,n->blobs[i].id);
-            n->virgl_renderer_resource_unref(n->blobs[i].id);
+            if (n->blobs[i].backing) (void)hv_neptune_detach_backing(n,n->blobs[i].id);
+        n->virgl_renderer_resource_unref(n->blobs[i].id);
         }
         /* Cleanup joins the renderer's contexts before releasing callback state. */
         n->virgl_renderer_cleanup(n);

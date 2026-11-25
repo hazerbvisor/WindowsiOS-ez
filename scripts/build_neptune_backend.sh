@@ -68,7 +68,7 @@ HDR="$OUT/include/virgl"
 if [[ ! -f "$HDR/virglrenderer.h" ]]; then HDR="$OUT/include"; fi
 test -f "$HDR/virglrenderer.h"
 "$CC" -target arm64-apple-ios17.0 -isysroot "$SDK" -std=c11 -D_DARWIN_C_SOURCE \
-    -DWINIOS_ENABLE_NEPTUNE -Wall -Wextra -Werror -I"$HDR" -I"$DEPS/include" \
+    -DWINIOS_ENABLE_NEPTUNE -Wall -Wextra -Werror -I"$HDR" -I"$DEPS/include" -I"$ROOT/core" -I"$ROOT/host" -I"$ROOT/devices" \
     -c "$ROOT/devices/neptune_backend.c" -o "$WORK/neptune_backend.o"
 "$CC" -target arm64-apple-ios17.0 -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror \
     -c "$ROOT/devices/neptune_wire.c" -o "$WORK/neptune_wire.o"

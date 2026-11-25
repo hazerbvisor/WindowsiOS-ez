@@ -494,11 +494,57 @@ out:
     return hv_virtq_write(&gpu->vio,elem,0,&response,sizeof(response));
 }
 
+static uint32_t neptune_backing_command(HvVirtioGpu *gpu,const HvVirtqElem *elem,const Header *hdr) {
+    Header response=*hdr; response.type=ERR_PARAMETER;
+    uint32_t body[12]={0};
+    uint64_t length=segment_capacity(elem,0);
+    if (hdr->flags&~FENCE || segment_capacity(elem,1)<sizeof(response)) return 0;
+    if (hdr->type==RESOURCE_ATTACH_BACKING) {
+        if (length<32 || hv_virtq_read(&gpu->vio,elem,24,body,8)!=8 ||
+            !body[1] || body[1]>8192 || length!=32+(uint64_t)body[1]*16) goto done;
+        HvNptBacking *entries=calloc(body[1],sizeof(*entries));
+        if (!entries) { response.type=ERR_OOM; goto done; }
+        bool valid=true;
+        for (uint32_t i=0;i<body[1];++i) {
+            Entry e;
+            if (hv_virtq_read(&gpu->vio,elem,32+i*16,&e,16)!=16 ||
+                !hv_virtio_dma_ptr(&gpu->vio,e.addr,e.len) || !e.len) { valid=false; break; }
+            entries[i]=(HvNptBacking){.pa=e.addr,.len=e.len};
+        }
+        if (valid && !hv_neptune_attach_backing(gpu->neptune,gpu->vio.m,body[0],entries,body[1]))
+            response.type=OK_NODATA;
+        free(entries);
+    } else if (hdr->type==RESOURCE_DETACH_BACKING) {
+        if (length==32 && hv_virtq_read(&gpu->vio,elem,24,body,8)==8 &&
+            !hv_neptune_detach_backing(gpu->neptune,body[0])) response.type=OK_NODATA;
+    } else if (hdr->type==0x205 || hdr->type==0x206) {
+        if (length!=72 || hv_virtq_read(&gpu->vio,elem,24,body,48)!=48) goto done;
+        uint64_t offset=(uint64_t)body[7]<<32|body[6];
+        if (!hv_neptune_transfer(gpu->neptune,gpu->vio.m,body[8],hdr->context,body,offset,body[9],body[10],body[11],hdr->type==0x205))
+            response.type=OK_NODATA;
+    } else if (hdr->type==TRANSFER_TO_HOST_2D) {
+        if (length!=56 || hv_virtq_read(&gpu->vio,elem,24,body,32)!=32) goto done;
+        uint32_t box[6]={body[0],body[1],0,body[2],body[3],1};
+        uint64_t offset=(uint64_t)body[5]<<32|body[4];
+        if (!hv_neptune_transfer(gpu->neptune,gpu->vio.m,body[6],hdr->context,box,offset,0,0,0,true))
+            response.type=OK_NODATA;
+    }
+done:
+    if (response.type>=ERR_UNSPEC) gpu->command_errors++;
+    return hv_virtq_write(&gpu->vio,elem,0,&response,sizeof(response));
+}
+
 static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *written,bool *deferred) {
     Header hdr={0};
     HvVirtio *v=&gpu->vio;
     if (!gpu->neptune || (v->driver_features & 0x19)!=0x19 ||
         hv_virtq_read(v,elem,0,&hdr,sizeof(hdr))!=sizeof(hdr)) return false;
+    if (hdr.type==RESOURCE_ATTACH_BACKING || hdr.type==RESOURCE_DETACH_BACKING || hdr.type==TRANSFER_TO_HOST_2D || hdr.type==0x205 || hdr.type==0x206) {
+        uint32_t id=0,offset=hdr.type==TRANSFER_TO_HOST_2D?48:(hdr.type==0x205 || hdr.type==0x206)?56:24;
+        if (hv_virtq_read(v,elem,offset,&id,4)==4 && hv_neptune_blob_exists(gpu->neptune,id)) {
+            *written=neptune_backing_command(gpu,elem,&hdr); return true;
+        }
+    }
     if (hdr.type==0x10d) {
         *written=neptune_scanout_command(gpu,elem,&hdr);
         return true;
@@ -512,6 +558,12 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
     }
     bool route=(hdr.type>=0x200 && hdr.type<=0x209) || hdr.type==GET_CAPSET_INFO ||
         hdr.type==GET_CAPSET || hdr.type==0x10c;
+    if (hdr.type==RESOURCE_CREATE_2D) {
+        uint32_t id=0;
+        if (hv_virtq_read(v,elem,24,&id,4)==4 && hv_neptune_blob_exists(gpu->neptune,id)) {
+            hdr.type=ERR_RESOURCE; *written=hv_virtq_write(v,elem,0,&hdr,sizeof(hdr)); return true;
+        }
+    }
     if (hdr.type==RESOURCE_UNREF) {
         uint32_t id=0;
         if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4)
