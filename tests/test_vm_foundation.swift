@@ -144,6 +144,17 @@ enum VMFoundationTests {
             let firmware = try store.firmware(for: restored, assets: assets)
             try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: variables.path)
             let machine = try store.prepare(restored, repository: repo, firmware: firmware)
+            let legacyManifest = try PropertyListEncoder().encode(machine)
+            let migrated = try PropertyListDecoder().decode(VirtualMachine.self, from: legacyManifest)
+            precondition(migrated.displayScaling == nil && migrated.lastOpened == nil && migrated.hardware.jitOverrideMiB == nil)
+            var personalized = migrated
+            personalized.displayScaling = "fill"
+            personalized.hardware.jitOverrideMiB = 768
+            personalized.lastGuestWidth = 1024
+            personalized.lastGuestHeight = 768
+            personalized.lastOpened = Date(timeIntervalSince1970: 42)
+            let roundTrip = try PropertyListDecoder().decode(VirtualMachine.self, from: PropertyListEncoder().encode(personalized))
+            precondition(roundTrip == personalized && roundTrip.hardware.jitMiB == 768)
             let disk = repo.directory(for: machine).appendingPathComponent(VMRepository.rawDisk)
             let diskBytes = try regularFileSize(disk)
             precondition(diskBytes == 64 << 30)

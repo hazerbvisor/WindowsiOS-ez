@@ -44,12 +44,14 @@ static NSString *const kFbShaderSource =
     id<MTLTexture> texture;
     uint32_t texW, texH;
     dispatch_source_t timer;
+    unsigned fps;
     _Atomic(uint64_t) framesPresented;
     uint64_t lastHash;
     CGSize lastDrawableSize;
 }
 - (instancetype)initWithDisplay:(HvFbDisplay *)display;
 - (void)setTargetLayer:(CAMetalLayer *)newLayer;
+- (void)setPresentationRate:(unsigned)rate;
 - (void)tick;
 @end
 
@@ -59,6 +61,7 @@ static NSString *const kFbShaderSource =
     if ((self = [super init])) {
         fb = display;
         lock = OS_UNFAIR_LOCK_INIT;
+        fps = 60;
         device = MTLCreateSystemDefaultDevice();
         if (device) {
             queue = [device newCommandQueue];
@@ -93,7 +96,7 @@ static NSString *const kFbShaderSource =
         if (!timer) {
             dispatch_queue_t q = dispatch_queue_create("io.github.hazerbvisor.windowsios-ez.fbmetal", DISPATCH_QUEUE_SERIAL);
             timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 60, 2 * NSEC_PER_MSEC);
+            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / fps, NSEC_PER_MSEC);
             __weak HvFbMetalPresenter *weakSelf = self;
             dispatch_source_set_event_handler(timer, ^{
                 [weakSelf tick];
@@ -103,6 +106,15 @@ static NSString *const kFbShaderSource =
     } else if (!layer && timer) {
         dispatch_source_cancel(timer);
         timer = nil;
+    }
+    os_unfair_lock_unlock(&lock);
+}
+
+- (void)setPresentationRate:(unsigned)rate {
+    os_unfair_lock_lock(&lock);
+    if (fps != rate) {
+        fps = rate;
+        if (timer) dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / fps, NSEC_PER_MSEC);
     }
     os_unfair_lock_unlock(&lock);
 }
@@ -219,6 +231,10 @@ void hv_fb_metal_set_layer(HvFbDisplay *fb, void *ca_metal_layer) {
     HvFbMetalPresenter *p = ensure_presenter(fb);
     if (!p) return;
     [p setTargetLayer:(__bridge CAMetalLayer *)ca_metal_layer];
+}
+
+void hv_fb_metal_set_rate(HvFbDisplay *fb, unsigned fps) {
+    if (fps >= 1 && fps <= 120) [ensure_presenter(fb) setPresentationRate:fps];
 }
 
 uint64_t hv_fb_metal_frames(HvFbDisplay *fb) {

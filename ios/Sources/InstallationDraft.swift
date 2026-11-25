@@ -30,6 +30,7 @@ struct InstallationDraft: Codable, Equatable {
     var driverID: UUID?
     var useCustomFirmware: Bool?
     var installationMethod: WindowsInstallationMethod?
+    var displayScaling: String?
     var lastError: String?
 
     var method: WindowsInstallationMethod { installationMethod ?? .direct }
@@ -98,13 +99,15 @@ struct InstallationDraftStore: Sendable {
     }
 
     func prepare(_ draft: InstallationDraft, repository: VMRepository, firmware: VMFirmware,
-                 installer: URL? = nil, prepareTarget: ((URL) throws -> Void)? = nil) throws -> VirtualMachine {
+                 installer: URL? = nil, prepareTarget: ((URL) throws -> Void)? = nil,
+                 windowsEdition: String? = nil) throws -> VirtualMachine {
         try draft.validateForPreparation()
         return try repository.createBlank(id: draft.machineID, name: draft.name, hardware: draft.hardware,
                                           capacityGiB: draft.capacityGiB, mediaID: draft.mediaID,
                                           code: firmware.code, variables: firmware.variables, installer: installer,
                                           installationMethod: draft.installationMethod,
-                                          prepareTarget: prepareTarget)
+                                          prepareTarget: prepareTarget, windowsEdition: windowsEdition,
+                                          displayScaling: draft.displayScaling)
     }
 
     func cleanupFirmwareCopies() {

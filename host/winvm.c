@@ -43,6 +43,7 @@ static char *setup_disk_path;
 #endif
 
 static os_unfair_lock display_lock = OS_UNFAIR_LOCK_INIT;
+static _Atomic unsigned display_rate = 60;
 static CFTypeRef display_layer;
 static int display_layer_set;
 static _Atomic(HvFbDisplay *) display_fb;
@@ -127,9 +128,18 @@ void hv_winvm_set_display_layer(void *layer) {
     display_layer = retained;
     display_layer_set = 1;
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
-    if (fb) hv_fb_metal_set_layer(fb, layer);
+    if (fb) {
+        hv_fb_metal_set_rate(fb, atomic_load_explicit(&display_rate, memory_order_relaxed));
+        hv_fb_metal_set_layer(fb, layer);
+    }
     os_unfair_lock_unlock(&display_lock);
     if (previous) CFRelease(previous);
+}
+
+void hv_winvm_set_presentation_rate(unsigned fps) {
+    if (fps < 1 || fps > 120 || atomic_exchange(&display_rate, fps) == fps) return;
+    HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
+    if (fb) hv_fb_metal_set_rate(fb, fps);
 }
 
 int hv_winvm_display_size(uint32_t *w, uint32_t *h) {

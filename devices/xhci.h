@@ -61,6 +61,7 @@ typedef struct HvXhci {
     uint8_t tab_reports[HV_XHCI_REPORTS][6];
     uint32_t thead, ttail;
     uint8_t tab_state[6];
+    uint8_t tab_last_motion;
 
     uint64_t delivered;
 } HvXhci;

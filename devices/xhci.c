@@ -912,8 +912,9 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down) {
             s[7] = 0;
         }
     }
-    if (x->rtail - x->rhead < HV_XHCI_REPORTS)
-        memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
+    /* On overflow preserve the newest keyboard state, including modifier releases. */
+    if (x->rtail - x->rhead == HV_XHCI_REPORTS) x->rhead++;
+    memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
@@ -933,10 +934,12 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
     rep[3] = (uint8_t)(abs_y & 0xff);
     rep[4] = (uint8_t)((abs_y >> 8) & 0xff);
     rep[5] = (uint8_t)wheel;
+    int edge = x->tab_state[0] != rep[0];
+    int motion = !edge && !wheel;
     memcpy(x->tab_state, rep, 6);
 
-    /* Coalesce pure motion updates if queue has unconsumed entries and buttons/wheel match */
-    if (!wheel && x->ttail > x->thead) {
+    /* A button edge retains its original coordinates, even during a rapid drag. */
+    if (motion && x->tab_last_motion && x->ttail != x->thead) {
         uint8_t *prev = x->tab_reports[(x->ttail - 1) % HV_XHCI_REPORTS];
         if (prev[0] == rep[0] && prev[5] == 0) {
             memcpy(prev, rep, 6);
@@ -945,8 +948,11 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
             return;
         }
     }
-    if (x->ttail - x->thead < HV_XHCI_REPORTS)
+    if (edge && x->ttail - x->thead == HV_XHCI_REPORTS) x->thead++;
+    if (x->ttail - x->thead < HV_XHCI_REPORTS) {
         memcpy(x->tab_reports[x->ttail++ % HV_XHCI_REPORTS], rep, 6);
+        x->tab_last_motion = motion;
+    }
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }

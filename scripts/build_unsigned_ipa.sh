@@ -29,11 +29,12 @@ mkdir -p build/artifacts
 # A fresh build directory prevents accidentally packaging an older product.
 STAGE="$(mktemp -d "$ROOT/build/unsigned.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
+BUILD_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || printf 'Unavailable')"
 PROJECT_ARGS=(-project ios/WindowsiOS.xcodeproj -scheme WindowsiOS
     -configuration Release -sdk iphoneos -destination 'generic/platform=iOS'
     -derivedDataPath "$STAGE/DerivedData"
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
-    DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
+    DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= "WINIOS_BUILD_COMMIT=$BUILD_COMMIT")
 xcodebuild "${PROJECT_ARGS[@]}" -showBuildSettings -json > "$STAGE/settings.json"
 python3 scripts/verify_ios_artifact.py settings "$STAGE/settings.json" ios/WindowsiOS.entitlements
 
