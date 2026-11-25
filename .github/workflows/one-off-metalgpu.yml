@@ -1,0 +1,43 @@
+name: One-off MetalGPU lab IPA
+on:
+  push:
+    branches: [build/metalgpu-cd413b7]
+    paths: [.github/workflows/one-off-metalgpu.yml]
+permissions:
+  contents: read
+jobs:
+  lab-ipa:
+    runs-on: xcode-27
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      WINIOS_NEPTUNE_LAB: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Prepare host tools
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(xcodebuild -version | head -n 1)" = "Xcode 27.2"
+          for formula in xcodegen meson ninja pkgconf autoconf automake libtool cmake python bison; do
+            if ! brew list --versions "$formula" >/dev/null; then brew install "$formula"; fi
+          done
+          python3 -m venv "$RUNNER_TEMP/metalgpu-venv"
+          "$RUNNER_TEMP/metalgpu-venv/bin/pip" install mako pyyaml packaging six pyparsing setuptools
+          echo "$RUNNER_TEMP/metalgpu-venv/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+      - name: Build pinned physical iOS graphics prerequisites
+        run: bash scripts/ci_metalgpu_prereqs.sh
+      - name: Build and verify MetalGPU lab IPA
+        run: bash scripts/build_unsigned_ipa.sh
+      - name: Upload verified lab IPA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: WindowsiOS-ez-MetalGPU-cd413b7-unsigned
+          path: build/artifacts/metalgpu-lab/
+          if-no-files-found: error
+          retention-days: 7
