@@ -1,5 +1,5 @@
 name: One-off MetalGPU lab IPA
-# Retry with Xcode 27.2 selection preserved and libc++ hardening migrated.
+# Retry 3: target only ANGLE archive; export project path for nested build script.
 on:
   push:
     branches: [build/metalgpu-cd413b7]

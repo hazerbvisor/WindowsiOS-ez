@@ -2,7 +2,7 @@
 set -euo pipefail
 # Reuse pinned UTM cross-build functions, only for ANGLE, epoxy and LLVM.
 # Never build or embed UTM/QEMU itself.
-ROOT="$(pwd)"
+export WINIOS_PROJECT_ROOT="$(pwd)"
 UTM="$RUNNER_TEMP/metalgpu-utm"
 REV=3d4b8d8cb1ce93a8b1a9610695c12487685f0c15
 git init "$UTM"
@@ -17,9 +17,10 @@ p=Path("scripts/build_dependencies.sh")
 s=p.read_text()
 s=s.replace('IOS_SDKMINVER="15.0"', 'IOS_SDKMINVER="17.0"')
 # Preserve the workflow-selected Xcode when upstream sanitizes its environment.
-old = 'env -i PATH=$PATH xcodebuild archive'
-assert s.count(old) == 1
-s=s.replace(old, 'env -i PATH="$PATH" DEVELOPER_DIR="$DEVELOPER_DIR" HOME="$HOME" xcodebuild archive')
+old = 'env -i PATH=$PATH xcodebuild archive -archivePath "ANGLE"'
+if s.count(old) != 1:
+    raise SystemExit(f'Expected exactly one ANGLE archive command; found {s.count(old)}')
+s=s.replace(old, 'env -i PATH="$PATH" DEVELOPER_DIR="$DEVELOPER_DIR" HOME="$HOME" xcodebuild archive -archivePath "ANGLE"')
 a=s.index("\ncheck_env\necho")
 # The original script has completed target, toolchain and environment setup here.
 # The selected dependency build uses its original pinned source and patches.
@@ -29,7 +30,7 @@ download $PKG_CONFIG_SRC
 clone $WEBKIT_REPO $WEBKIT_COMMIT "$WEBKIT_SUBDIRS"
 # The pinned WebKit configuration uses a removed libc++ macro.
 # Preserve hardening rather than disable assertions to get a build.
-python3 "$ROOT/scripts/patch_angle_xcode27.py" "$BUILD_DIR/WebKit.git"
+python3 "$WINIOS_PROJECT_ROOT/scripts/patch_angle_xcode27.py" "$BUILD_DIR/WebKit.git"
 clone $EPOXY_REPO $EPOXY_COMMIT
 download $LLVM15_SRC
 copy_private_headers
