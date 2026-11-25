@@ -225,7 +225,7 @@ struct GuestMouseButton: UIViewRepresentable {
 
     func updateUIView(_ view: MouseControl, context: Context) {
         view.input = input
-        view.mask = mask
+        view.buttonMask = mask
         view.setTitle(label, for: .normal)
     }
 
@@ -233,7 +233,7 @@ struct GuestMouseButton: UIViewRepresentable {
 
     final class MouseControl: UIButton {
         weak var input: GuestInput?
-        var mask: UInt8 = 0
+        var buttonMask: UInt8 = 0
         private let source = UUID()
 
         func configure() {
@@ -242,12 +242,12 @@ struct GuestMouseButton: UIViewRepresentable {
             addTarget(self, action: #selector(releaseButton), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         }
 
-        @objc private func pressButton() { input?.set(mask, source: source, down: true) }
+        @objc private func pressButton() { input?.set(buttonMask, source: source, down: true) }
 
         @objc func releaseButton() { input?.release(source) }
 
         override func accessibilityActivate() -> Bool {
-            input?.click(mask)
+            input?.click(buttonMask)
             return true
         }
     }

@@ -48,29 +48,31 @@ struct ApplicationStorageView: View {
     }
 
     private func refresh() async {
-        allocated = await Task.detached(priority: .utility) {
-            let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileAllocatedSizeKey]
-            let roots = [URL.applicationSupportDirectory, URL.documentsDirectory, URL.temporaryDirectory]
-            var totals: [Category: Int64] = [:]
-            for root in roots {
-                guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) else { continue }
-                for case let file as URL in files {
-                    guard let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true,
-                          values.isSymbolicLink != true, let size = values.fileAllocatedSize else { continue }
-                    let name = file.lastPathComponent.lowercased()
-                    let category: Category
-                    if file.pathComponents.contains(where: { $0.lowercased().contains("backup") }) { category = .backups }
-                    else if root == URL.temporaryDirectory || file.pathComponents.contains(where: { $0.hasPrefix(".staging-") }) { category = .temporary }
-                    else if name == VMRepository.rawDisk || name == VMRepository.packedDisk { category = .disks }
-                    else if name.hasSuffix(".iso") { category = .media }
-                    else if name.hasPrefix("installer") && name.hasSuffix(".img") { category = .installers }
-                    else if name.hasSuffix(".fd") { category = .firmware }
-                    else if name.hasSuffix(".log") || name.hasSuffix(".txt") || name == VMRepository.setupLogs.lowercased() { category = .diagnostics }
-                    else { category = .other }
-                    totals[category, default: 0] += Int64(size)
-                }
+        allocated = await Task.detached(priority: .utility) { Self.readAllocation() }.value
+    }
+
+    private nonisolated static func readAllocation() -> [Category: Int64] {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileAllocatedSizeKey]
+        let roots = [URL.applicationSupportDirectory, URL.documentsDirectory, URL.temporaryDirectory]
+        var totals: [Category: Int64] = [:]
+        for root in roots {
+            guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) else { continue }
+            for case let file as URL in files {
+                guard let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true,
+                      values.isSymbolicLink != true, let size = values.fileAllocatedSize else { continue }
+                let name = file.lastPathComponent.lowercased()
+                let category: Category
+                if file.pathComponents.contains(where: { $0.lowercased().contains("backup") }) { category = .backups }
+                else if root == URL.temporaryDirectory || file.pathComponents.contains(where: { $0.hasPrefix(".staging-") }) { category = .temporary }
+                else if name == VMRepository.rawDisk || name == VMRepository.packedDisk { category = .disks }
+                else if name.hasSuffix(".iso") { category = .media }
+                else if name.hasPrefix("installer") && name.hasSuffix(".img") { category = .installers }
+                else if name.hasSuffix(".fd") { category = .firmware }
+                else if name.hasSuffix(".log") || name.hasSuffix(".txt") || name == VMRepository.setupLogs.lowercased() { category = .diagnostics }
+                else { category = .other }
+                totals[category, default: 0] += Int64(size)
             }
-            return totals
-        }.value
+        }
+        return totals
     }
 }
