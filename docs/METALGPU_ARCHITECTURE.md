@@ -57,3 +57,9 @@ The next transport design should use a bounded worker and ordered completion bac
 ## Direct3D 12 boundary
 
 Neptune already has generated D3D12 commands and renderer overrides for devices, pipelines, resources and fences. DXMT has an optional D3D12 build path, outside this project's backend choice. The selected D3D12 backend is Madeira. The pinned Madeira runtime uses ARM64EC PE frontends, a native converter bridge and a Wine/FEX-oriented integration. Reuse requires a native iPadOS backend with a compatible D3D12/COM ABI, a verified shader dependency and a genuine Windows WDDM UMD path. Its existing A15 test reports concern Madeira's own environment. Any extension should follow a wire compatibility matrix and use a version and capability only for semantics that need new bytes or behavior. See [the roadmap](METALGPU_ROADMAP.md).
+
+## Staged native Neptune adapter
+
+The host adapter in `devices/neptune_backend.c` now calls the pinned virglrenderer API for native DXMT-only initialization, capset 7, contexts, immutable command submission, host3D blobs, map/unmap, bounded scalar aperture access and exact asynchronous fence tickets. It is deliberately not built into the default engine. `scripts/build_neptune_backend.sh` is an opt-in iPhoneOS thread-mode build with the pinned renderer and target libepoxy/epoll-shim prerequisites. The wrapper is not a substitute for dynamic guest normal-memory mappings or a full GPU memory budget (renderer allocations outside tracked blobs are not accounted).
+
+The guest-facing VirtIO transport must still dispatch those operations, map blob pages as normal guest memory with correct ARM atomics/TLB invalidation and teardown, and implement retained native Metal scanout. Until those are proven, the 2D device continues to advertise zero 3D capsets. The signed viogpu3d driver must not be activated. No build or hardware test was performed by this change.
