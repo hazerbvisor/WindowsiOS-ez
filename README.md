@@ -2,7 +2,7 @@
 
 # WindowsiOS-ez
 
-Import a Windows 11 24H2 ARM64 ISO in **Downloads**, or place it in **WindowsiOS-ez → Imports** in Files. Create a VM, select RAM, JIT cache and storage, then press **Install**. The wizard prepares the sparse disk, bundled QEMU firmware and ARM64 NetKVM before launching Windows Setup. Existing prepared Windows disks can still use the direct boot path. Full installation remains unverified on iPad.
+Import a Windows 11 24H2 ARM64 ISO in **Downloads**, or place it in **WindowsiOS-ez → Imports** in Files. Create a VM, select RAM, JIT cache and storage, then press **Install**. The wizard prepares the sparse disk, bundled QEMU firmware and ARM64 NetKVM. In the VM, Windows PE shows live DISM progress, creates EFI boot files with BCDBOOT and shuts down. Choose **Use Installed Windows Disk** in the library to continue to Windows account setup. **Advanced Settings** offers experimental Graphical Setup. End-to-end DISM provisioning still needs an iPad run.
 See [BUILDING.md](BUILDING.md) for the manual Codemagic unsigned IPA workflow,
 [TESTING.md](TESTING.md) for physical-device verification, and
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current coverage.

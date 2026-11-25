@@ -29,7 +29,10 @@ struct InstallationDraft: Codable, Equatable {
     var editionIndex: Int?
     var driverID: UUID?
     var useCustomFirmware: Bool?
+    var installationMethod: WindowsInstallationMethod?
     var lastError: String?
+
+    var method: WindowsInstallationMethod { installationMethod ?? .direct }
 
     func validateForPreparation() throws {
         guard mediaID != nil else { throw VMError.message("Select verified Windows 11 24H2 ARM64 installation media.") }
@@ -86,8 +89,8 @@ struct InstallationDraftStore: Sendable {
 
     func installerURL(for draft: InstallationDraft, media: UUID) -> URL {
         let drivers = draft.driverID?.uuidString ?? InstallerAssets.networkDriverVersion
-        let edition = draft.editionIndex.map(String.init) ?? "manual"
-        return root.appendingPathComponent("Installer-v2-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
+        let edition = draft.editionIndex.map(String.init) ?? "default"
+        return root.appendingPathComponent("Installer-v3-\(draft.method.rawValue)-\(draft.machineID.uuidString)-\(media.uuidString)-\(drivers)-\(edition).img")
     }
 
     func driversURL(for id: UUID) -> URL {
@@ -95,11 +98,13 @@ struct InstallationDraftStore: Sendable {
     }
 
     func prepare(_ draft: InstallationDraft, repository: VMRepository, firmware: VMFirmware,
-                 installer: URL? = nil) throws -> VirtualMachine {
+                 installer: URL? = nil, prepareTarget: ((URL) throws -> Void)? = nil) throws -> VirtualMachine {
         try draft.validateForPreparation()
         return try repository.createBlank(id: draft.machineID, name: draft.name, hardware: draft.hardware,
                                           capacityGiB: draft.capacityGiB, mediaID: draft.mediaID,
-                                          code: firmware.code, variables: firmware.variables, installer: installer)
+                                          code: firmware.code, variables: firmware.variables, installer: installer,
+                                          installationMethod: draft.installationMethod,
+                                          prepareTarget: prepareTarget)
     }
 
     func cleanupFirmwareCopies() {

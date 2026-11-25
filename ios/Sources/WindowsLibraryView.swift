@@ -173,7 +173,7 @@ private struct MachineLibraryView: View {
                     adoptInstalledDisk(machine, removeInstaller: false)
                 }
             } message: { _ in
-                Text("Continue after Windows Setup has finished and the guest has shut down. The primary disk is checked for ARM64 Windows boot files before switching.")
+                Text("Continue after installation has finished and the guest has shut down. The app checks the primary disk for ARM64 Windows boot files before switching.")
             }
     }
 
@@ -209,12 +209,14 @@ private struct MachineLibraryView: View {
     private func machineRow(_ machine: VirtualMachine) -> some View {
         let installer = repo.directory(for: machine).appendingPathComponent(VMRepository.installerDisk)
         let hasInstaller = FileManager.default.fileExists(atPath: installer.path)
+        let direct = machine.installationMethod == .direct
         return HStack {
             Label {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(machine.name).font(.headline)
                     Text(machine.installation == .preparedDisk ? "Prepared Windows disk"
-                         : hasInstaller ? "Windows Setup disk ready" : "Awaiting Windows installation")
+                         : hasInstaller ? (direct ? "DISM installation ready" : "Graphical Setup ready")
+                         : "Awaiting Windows installation")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
             } icon: {
@@ -227,10 +229,12 @@ private struct MachineLibraryView: View {
                         .disabled(sessionBusy || vm.needsRelaunchToStart)
                 } else {
                     if hasInstaller {
-                        Button("Start Windows Setup", systemImage: "play") { start(machine, installer: installer) }
+                        Button(direct ? "Start DISM Provisioning" : "Start Graphical Setup", systemImage: "play") {
+                            start(machine, installer: installer)
+                        }
                             .disabled(sessionBusy || vm.needsRelaunchToStart)
                     }
-                    if let mediaID = machine.mediaID {
+                    if !direct, let mediaID = machine.mediaID {
                         Button(hasInstaller ? "Update Windows Setup Disk" : "Build Windows Setup Disk", systemImage: "opticaldisc") {
                             buildInstaller(for: mediaID, output: installer)
                         }
@@ -241,7 +245,7 @@ private struct MachineLibraryView: View {
                 }
                 if FileManager.default.fileExists(atPath: repo.directory(for: machine)
                     .appendingPathComponent(VMRepository.setupLogs).path) {
-                    Button("Export Windows Setup Logs", systemImage: "square.and.arrow.up") { exportSetupLogs(machine) }
+                    Button("Export Installation Logs", systemImage: "square.and.arrow.up") { exportSetupLogs(machine) }
                         .disabled(sessionBusy)
                 }
                 if activeMachine?.id == machine.id && vm.isVMRunning {
@@ -281,7 +285,7 @@ private struct MachineLibraryView: View {
         guard !sessionBusy, !busy, !vm.needsRelaunchToStart else { return }
         activeMachine = machine
         vm.open(directory: machine.map { repo.directory(for: $0) }, hardware: machine?.hardware ?? VMHardware(),
-                installer: installer, useTPM: machine?.usesTPM == true)
+                installer: installer, useTPM: machine?.usesTPM == true, method: machine?.installationMethod)
         showSession = true
     }
 

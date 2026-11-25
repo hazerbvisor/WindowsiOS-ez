@@ -644,7 +644,7 @@ struct SessionView: View {
                     Button {
                         vm.startOrRetry()
                     } label: {
-                        Text(vm.isJITLive ? (vm.isSetupSession ? "START WINDOWS SETUP" : "BOOT WINDOWS 11") : "RETRY BOOT")
+                        Text(vm.isJITLive ? vm.bootActionTitle : "RETRY BOOT")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .tracking(1.1)
                             .foregroundStyle(Color(red: 0.04, green: 0.05, blue: 0.09))

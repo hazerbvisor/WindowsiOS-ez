@@ -20,12 +20,20 @@ enum InstallerPreparation {
             winios_has_windows_boot_files(path, efi.start, efi.sectors) == 1
         }
         guard present else {
-            throw VMError.message("The primary disk has no ARM64 Windows Boot Manager and BCD. Continue in Windows Setup.")
+            throw VMError.message("The primary disk has no ARM64 Windows Boot Manager and BCD. Review the installation logs.")
         }
     }
 
+    static func makeDirectTarget(_ disk: URL, capacityGiB: Int, guid: UUID) throws {
+        let result = disk.withUnsafeFileSystemRepresentation { path in
+            guid.uuidString.withCString { winios_create_direct_target(path, UInt64(capacityGiB) << 30, $0) }
+        }
+        guard result == 0 else { throw VMError.message("Could not create the new sparse GPT target for DISM.") }
+    }
+
     static func build(iso: URL, output: URL, expectedSHA256: String?, drivers: URL? = nil,
-                      edition: Int? = nil, progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
+                      edition: Int? = nil, directTarget: UUID? = nil,
+                      progress: @escaping @Sendable (InstallerProgress) -> Void) throws {
         try Task.checkCancellation()
         let manager = FileManager.default
         if manager.fileExists(atPath: output.path) {
@@ -42,6 +50,14 @@ enum InstallerPreparation {
         if let edition, !inspection.images.contains(where: { $0.index == edition }) {
             throw VMError.message("The selected Windows edition is missing from this ISO.")
         }
+        let directImageIndex: Int32?
+        if directTarget != nil {
+            let image = try WindowsImageMetadata.directImage(in: inspection.images, requested: edition)
+            guard let index = Int32(exactly: image.index) else { throw VMError.message("The DISM image index is invalid.") }
+            directImageIndex = index
+        } else {
+            directImageIndex = nil
+        }
         let parent = output.deletingLastPathComponent()
         try manager.createDirectory(at: parent, withIntermediateDirectories: true)
         let workspace = parent.appendingPathComponent(".staging-\(UUID().uuidString)")
@@ -50,7 +66,7 @@ enum InstallerPreparation {
         let wim = workspace.appendingPathComponent("boot.wim")
         let stagedDisk = workspace.appendingPathComponent(VMRepository.installerDisk)
         let answer = workspace.appendingPathComponent("Unattend.xml")
-        if let edition { try WindowsUnattend.make(imageIndex: edition).write(to: answer, options: .atomic) }
+        if directTarget == nil, let edition { try WindowsUnattend.make(imageIndex: edition).write(to: answer, options: .atomic) }
 
         let sink = InstallerProgressSink(progress: progress)
         let opaque = Unmanaged.passUnretained(sink).toOpaque()
@@ -58,7 +74,13 @@ enum InstallerPreparation {
         sink.setStage(.winPE)
         let winPEResult = iso.withUnsafeFileSystemRepresentation { input in
             workspace.withUnsafeFileSystemRepresentation { directory in
-                winios_prepare_winpe_wim(input, directory, installerProgress, opaque, &error, error.count)
+                if let guid = directTarget?.uuidString, let directImageIndex {
+                    return guid.withCString {
+                        winios_prepare_direct_winpe_wim(input, directory, $0, directImageIndex,
+                                                        installerProgress, opaque, &error, error.count)
+                    }
+                }
+                return winios_prepare_winpe_wim(input, directory, installerProgress, opaque, &error, error.count)
             }
         }
         guard winPEResult == 0 else {
@@ -70,6 +92,12 @@ enum InstallerPreparation {
             stagedDisk.withUnsafeFileSystemRepresentation { destination in
                 wim.withUnsafeFileSystemRepresentation { prepared in
                     let driverPath = drivers?.path
+                    if let guid = directTarget?.uuidString {
+                        return guid.withCString {
+                            winios_build_direct_installer_disk(input, destination, prepared, driverPath, $0,
+                                                              installerProgress, opaque, &error, error.count)
+                        }
+                    }
                     let answerPath = edition == nil ? nil : answer.path
                     return winios_build_installer_disk(input, destination, prepared, driverPath, answerPath,
                                                         installerProgress, opaque, &error, error.count)

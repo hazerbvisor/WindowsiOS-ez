@@ -9,12 +9,26 @@ struct WindowsImage: Codable, Equatable {
     let index: Int
     let architecture: Int
     let build: Int
+    var editionID: String? = nil
 
     static let arm64 = 12
     static let baselineBuild = 26100
 }
 
 enum WindowsImageMetadata {
+    static func directImage(in images: [WindowsImage], requested: Int?) throws -> WindowsImage {
+        try requireBaseline(images, media: "Windows installation image")
+        if let requested {
+            guard let image = images.first(where: { $0.index == requested }) else {
+                throw VMError.message("The selected Windows edition is missing from this ISO.")
+            }
+            return image
+        }
+        let sorted = images.sorted { $0.index < $1.index }
+        guard let first = sorted.first else { throw VMError.message("No Windows installation image was found.") }
+        return sorted.first { $0.editionID?.caseInsensitiveCompare("Professional") == .orderedSame } ?? first
+    }
+
     /// WIM/ESD header offsets and XML fields follow the Microsoft WIM format.
     static func read(length: UInt64, bytes: (UInt64, Int) throws -> Data) throws -> [WindowsImage] {
         let header = try bytes(0, 96)
@@ -70,6 +84,8 @@ private final class WIMMetadataParser: NSObject, XMLParserDelegate {
     private var name = ""
     private var architecture: Int?
     private var build: Int?
+    private var flags: String?
+    private var editionID: String?
     private var text = ""
 
     func parser(_ parser: XMLParser, didStartElement element: String, namespaceURI: String?,
@@ -81,6 +97,8 @@ private final class WIMMetadataParser: NSObject, XMLParserDelegate {
             name = ""
             architecture = nil
             build = nil
+            flags = nil
+            editionID = nil
         }
         if path.count > 32 { parser.abortParsing() }
         text = ""
@@ -98,14 +116,17 @@ private final class WIMMetadataParser: NSObject, XMLParserDelegate {
         let string = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch path {
         case ["WIM", "IMAGE", "NAME"]: name = string
+        case ["WIM", "IMAGE", "FLAGS"]: flags = string
         case ["WIM", "IMAGE", "WINDOWS", "ARCH"]: architecture = Int(string)
+        case ["WIM", "IMAGE", "WINDOWS", "EDITIONID"]: editionID = string
         case ["WIM", "IMAGE", "WINDOWS", "VERSION", "BUILD"]: build = Int(string)
         case ["WIM", "IMAGE"]:
             guard let index, index > 0, let architecture, let build, !name.isEmpty else {
                 parser.abortParsing()
                 return
             }
-            images.append(WindowsImage(name: name, index: index, architecture: architecture, build: build))
+            images.append(WindowsImage(name: name, index: index, architecture: architecture, build: build,
+                                       editionID: editionID ?? flags))
         default: break
         }
         path.removeLast()

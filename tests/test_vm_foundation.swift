@@ -74,9 +74,17 @@ enum VMFoundationTests {
         let images = try parse(good)
         try WindowsImageMetadata.requireBaseline(images, media: "Fixture")
         precondition(images == [WindowsImage(name: "Windows 11 Pro", index: 1, architecture: 12, build: 26100)])
+        let localized = [WindowsImage(name: "Édition familiale", index: 1, architecture: 12, build: 26100, editionID: "Core"),
+                         WindowsImage(name: "Professionnel", index: 6, architecture: 12, build: 26100, editionID: "Professional")]
+        let automatic = try WindowsImageMetadata.directImage(in: localized, requested: nil)
+        let override = try WindowsImageMetadata.directImage(in: localized, requested: 1)
+        let ltscOnly = try WindowsImageMetadata.directImage(in: [localized[0]], requested: nil)
+        precondition(automatic.index == 6 && override.index == 1 && ltscOnly.index == 1)
+        try rejects { _ = try WindowsImageMetadata.directImage(in: localized, requested: 2) }
         for (arch, build) in [(9, 26100), (12, 28000)] {
             let other = try parse(syntheticWIM(architecture: arch, build: build))
             try rejects { try WindowsImageMetadata.requireBaseline(other, media: "Fixture") }
+            try rejects { _ = try WindowsImageMetadata.directImage(in: other, requested: nil) }
         }
         try rejects { _ = try parse(good.dropLast()) }
         var oversized = good
@@ -126,8 +134,10 @@ enum VMFoundationTests {
             try store.importFirmware(variables, destination: store.variables)
 
             var draft = InstallationDraft()
+            precondition(draft.method == .direct)
             draft.stage = .preparing
             draft.mediaID = UUID()
+            draft.installationMethod = .graphical
             try store.save(draft)
             let restored = try store.load()
             precondition(restored == draft)

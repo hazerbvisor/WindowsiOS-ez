@@ -12,8 +12,8 @@
 
 1. Build and sign the app for a real iPad. Boot a prepared Windows 11 24H2 image with Compatibility before testing Setup or larger caches.
 2. Build the GPT installer from legitimate 26100 media. Verify that ARM64 EDK2 boots its FAT32 partition and that WinPE locates the exFAT payload. Test the native launcher with a WIM and supported ESD media.
-3. Verify standard Windows Setup with compatible Secure Boot firmware and TPM 2.0. The app presents a libtpms-backed TPM 2.0 FIFO device for new installations and keeps Setup's normal hardware requirements.
-4. Confirm Setup applies the chosen edition, creates EFI boot files and accepts the signed ARM64 NetKVM package. Boot the primary disk and complete standard Windows account setup and activation.
-5. Verify stock Setup can use the generated answer file on an empty primary disk and recover interactively once the disk has data. Confirm the primary EFI checks, installer cleanup and intact source ISO. These checks precede any alternate direct DISM/BCDBOOT workflow.
+3. Verify DISM provisioning on a new VM with compatible Secure Boot firmware and TPM 2.0. Confirm the GPT identity check chooses the primary disk, DISM applies the selected edition and accepts the signed ARM64 NetKVM package, and BCDBOOT and BCDEDIT finish.
+4. Boot the primary disk and complete standard Windows account setup and activation. Interrupt a disposable VM during deployment and confirm that another launch preserves the partially installed disk. Verify export of the failure logs.
+5. Test the experimental Graphical Setup method and its optional edition-only answer file separately. Confirm primary EFI checks, installer cleanup and the intact source ISO for both methods.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the locally verified portions.

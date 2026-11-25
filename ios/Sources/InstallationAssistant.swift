@@ -102,13 +102,16 @@ struct InstallationAssistant: View {
                 }
                 if let media = selectedMedia {
                     Picker("Windows edition", selection: $draft.editionIndex) {
-                        Text("Choose in Windows Setup").tag(Int?.none)
+                        Text(draft.method == .direct ? "Automatic (prefers Windows 11 Pro)" : "Choose in Windows Setup")
+                            .tag(Int?.none)
                         ForEach(media.images, id: \.index) { image in
                             Text(image.name).tag(Optional(image.index))
                         }
                     }
-                    Text("You will choose the target disk in Windows Setup. Select the unallocated disk with the capacity you configured.")
-                        .foregroundStyle(.secondary)
+                    if draft.method == .graphical {
+                        Text("In Setup, select the unallocated disk with the capacity you configured.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Button("Open Downloads", systemImage: "arrow.down.circle") { showMedia = true }
             }
@@ -155,14 +158,16 @@ struct InstallationAssistant: View {
             }
         case .prepared:
             Label("Virtual machine saved", systemImage: "checkmark.circle")
-            Text("Windows Setup checks the guest hardware and handles the standard Windows installation.")
+            Text(draft.method == .direct
+                 ? "Watch DISM apply Windows in the VM. After it shuts down, use the installed disk from the VM library."
+                 : "Windows Setup will guide you through the installation.")
                 .foregroundStyle(.secondary)
-            Button("Launch Windows Setup", systemImage: "play") {
+            Button("Launch Installation", systemImage: "play") {
                 do {
                     guard let machine = try repository.list().first(where: { $0.id == draft.machineID }),
                           FileManager.default.fileExists(atPath: repository.directory(for: machine)
                             .appendingPathComponent(VMRepository.installerDisk).path) else {
-                        throw VMError.message("Open this machine in the library to build its Setup disk.")
+                        throw VMError.message("The installer disk for this virtual machine is missing.")
                     }
                     try store.save(InstallationDraft())
                     onLaunch(machine)
@@ -178,6 +183,14 @@ struct InstallationAssistant: View {
 
     private var advancedSettings: some View {
         Form {
+            Section("Installation method") {
+                Picker("Method", selection: Binding(get: { draft.method }, set: { draft.installationMethod = $0 })) {
+                    ForEach(WindowsInstallationMethod.allCases, id: \.self) { method in
+                        Text(method.title).tag(method)
+                    }
+                }
+                .disabled(saving)
+            }
             Section("EDK2 firmware") {
                 Toggle("Use custom firmware", isOn: Binding(
                     get: { draft.useCustomFirmware == true },
@@ -244,6 +257,12 @@ struct InstallationAssistant: View {
             case .welcome, .device, .jit: draft.stage = .media
             case .storage, .review: draft.stage = .hardware
             default: break
+            }
+            if draft.stage == .preparing || draft.stage == .prepared,
+               FileManager.default.fileExists(atPath: repository.root.path),
+               let existing = try repository.list().first(where: { $0.id == draft.machineID }) {
+                draft.stage = .prepared
+                draft.installationMethod = existing.installationMethod ?? .graphical
             }
             selectOnlyMedia()
             removeAbandonedStaging(in: store.root)
@@ -391,6 +410,7 @@ struct InstallationAssistant: View {
             try draft.validateForPreparation()
             var preparing = draft
             preparing.stage = .preparing
+            preparing.installationMethod = draft.method
             preparing.lastError = nil
             try store.save(preparing)
             draft = preparing
@@ -406,12 +426,17 @@ struct InstallationAssistant: View {
                         let assets = InstallerAssets.bundled
                         let firmware = try store.firmware(for: input, assets: assets)
                         let drivers = try store.driverDirectory(for: input, assets: assets)
+                        let directTarget = input.method == .direct ? input.machineID : nil
                         try InstallerPreparation.build(iso: iso, output: stageDisk, expectedSHA256: source.savedChecksum,
-                                                       drivers: drivers, edition: input.editionIndex) { status in
+                                                       drivers: drivers, edition: input.editionIndex, directTarget: directTarget) { status in
                             Task { @MainActor in progress.wrappedValue = status }
                         }
                         try Task.checkCancellation()
-                        return try store.prepare(input, repository: repository, firmware: firmware, installer: stageDisk)
+                        let prepareTarget: ((URL) throws -> Void)? = directTarget.map { guid in
+                            { disk in try InstallerPreparation.makeDirectTarget(disk, capacityGiB: input.capacityGiB, guid: guid) }
+                        }
+                        return try store.prepare(input, repository: repository, firmware: firmware, installer: stageDisk,
+                                                 prepareTarget: prepareTarget)
                     }
                     preparationTask = work
                     defer { preparationTask = nil }

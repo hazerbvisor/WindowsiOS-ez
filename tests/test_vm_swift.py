@@ -59,6 +59,8 @@ class SwiftFoundationTests(unittest.TestCase):
             "    print(media.diagnostics)\n"
             "    print(media.computedSHA256)\n"
             "    print(media.images.map { \"\\($0.name):\\($0.architecture):\\($0.build)\" })\n"
+            "    let direct = try WindowsImageMetadata.directImage(in: media.images, requested: nil)\n"
+            "    print(\"Default DISM index \\(direct.index)\")\n"
             "} catch {\n"
             "    print(error.localizedDescription)\n"
             "    exit(2)\n"
@@ -144,6 +146,7 @@ class SwiftFoundationTests(unittest.TestCase):
             result = subprocess.run([binary, GENUINE_ISO, GENUINE_SHA256], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout.decode())
             self.assertIn(b":12:26100", result.stdout)
+            self.assertRegex(result.stdout, rb"Default DISM index [1-9][0-9]*")
 
     @unittest.skipUnless(os.environ.get("WINDOWSIOS_TEST_LARGE_ISO") and GENISOIMAGE and UDF_HEADER and UDF_LIBRARY,
                          "set WINDOWSIOS_TEST_LARGE_ISO to exercise a multi-gigabyte streaming import")

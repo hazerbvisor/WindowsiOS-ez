@@ -64,7 +64,15 @@ final class VMViewModel: ObservableObject {
     @Published var isDebuggerAttached: Bool = false
     @Published var isVMRunning: Bool = false
     @Published var needsRelaunchToStart = false
-    @Published private(set) var isSetupSession = false
+    @Published private(set) var installationSession: WindowsInstallationMethod?
+
+    var bootActionTitle: String {
+        switch installationSession {
+        case .direct: "START DISM PROVISIONING"
+        case .graphical: "START GRAPHICAL SETUP"
+        case nil: "BOOT WINDOWS 11"
+        }
+    }
     @Published var isUnpacking: Bool = false
     @Published var unpackProgress: Double = 0
     @Published var jitStatusText: String = "Checking JIT..."
@@ -255,11 +263,12 @@ final class VMViewModel: ObservableObject {
         syncFromBridge()
     }
 
-    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false) {
+    func open(directory: URL?, hardware: VMHardware, installer: URL? = nil, useTPM: Bool = false,
+              method: WindowsInstallationMethod? = nil) {
         bootDirectory = directory
         bootInstaller = installer
         bootUsesTPM = useTPM || installer != nil
-        isSetupSession = installer != nil
+        installationSession = installer == nil ? nil : (method ?? .graphical)
         bootHardware = hardware
         startOrRetry()
     }

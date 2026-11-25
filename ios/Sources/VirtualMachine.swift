@@ -35,6 +35,17 @@ struct VMHardware: Codable, Equatable {
     }
 }
 
+enum WindowsInstallationMethod: String, Codable, CaseIterable {
+    case direct, graphical
+
+    var title: String {
+        switch self {
+        case .direct: "DISM provisioning"
+        case .graphical: "Graphical Setup (Experimental)"
+        }
+    }
+}
+
 struct VirtualMachine: Codable, Identifiable, Equatable {
     enum Installation: String, Codable {
         case preparedDisk, blankDisk
@@ -45,16 +56,19 @@ struct VirtualMachine: Codable, Identifiable, Equatable {
     var hardware: VMHardware
     var installation: Installation
     var usesTPM: Bool?
+    var installationMethod: WindowsInstallationMethod?
     let capacityGiB: Int?
     let mediaID: UUID?
 
     init(id: UUID = UUID(), name: String, hardware: VMHardware = VMHardware(),
-         installation: Installation, capacityGiB: Int? = nil, mediaID: UUID? = nil, usesTPM: Bool? = nil) {
+         installation: Installation, capacityGiB: Int? = nil, mediaID: UUID? = nil, usesTPM: Bool? = nil,
+         installationMethod: WindowsInstallationMethod? = nil) {
         self.id = id
         self.name = name
         self.hardware = hardware
         self.installation = installation
         self.usesTPM = usesTPM
+        self.installationMethod = installationMethod
         self.capacityGiB = capacityGiB
         self.mediaID = mediaID
     }
@@ -131,9 +145,15 @@ struct VMRepository: Sendable {
     }
 
     func createBlank(id: UUID, name: String, hardware: VMHardware, capacityGiB: Int, mediaID: UUID?,
-                     code: URL, variables: URL, installer: URL? = nil) throws -> VirtualMachine {
+                     code: URL, variables: URL, installer: URL? = nil,
+                     installationMethod: WindowsInstallationMethod? = nil,
+                     prepareTarget: ((URL) throws -> Void)? = nil) throws -> VirtualMachine {
+        if installationMethod == .direct, installer == nil || prepareTarget == nil {
+            throw VMError.message("DISM provisioning requires both the installer and a new GPT target.")
+        }
         let machine = VirtualMachine(id: id, name: name, hardware: hardware, installation: .blankDisk,
-                                     capacityGiB: capacityGiB, mediaID: mediaID, usesTPM: true)
+                                     capacityGiB: capacityGiB, mediaID: mediaID, usesTPM: true,
+                                     installationMethod: installationMethod)
         if FileManager.default.fileExists(atPath: directory(for: machine).path) {
             let existing = try loadManifest(in: directory(for: machine))
             var updated = existing
@@ -150,6 +170,10 @@ struct VMRepository: Sendable {
                 try FileManager.default.linkItem(at: installer, to: stage.appendingPathComponent(Self.installerDisk))
             }
             let disk = stage.appendingPathComponent(Self.rawDisk)
+            if let prepareTarget {
+                try prepareTarget(disk)
+                return
+            }
             guard FileManager.default.createFile(atPath: disk.path, contents: nil) else {
                 throw VMError.message("Unable to create the virtual disk.")
             }
@@ -167,7 +191,8 @@ struct VMRepository: Sendable {
         let machine = VirtualMachine(name: original?.name ?? source.lastPathComponent,
                                      hardware: original?.hardware ?? VMHardware(),
                                      installation: original?.installation ?? .preparedDisk,
-                                     capacityGiB: original?.capacityGiB, usesTPM: original?.usesTPM)
+                                     capacityGiB: original?.capacityGiB, usesTPM: original?.usesTPM,
+                                     installationMethod: original?.installationMethod)
         try publish(machine) { stage in
             try copyMachineFiles(from: source, to: stage, copyDisk: copyDisk)
             if machine.installation == .preparedDisk {
@@ -196,7 +221,8 @@ struct VMRepository: Sendable {
     func duplicate(_ original: VirtualMachine, copyDisk: (URL, URL) throws -> Void) throws -> VirtualMachine {
         let machine = VirtualMachine(name: String(original.name.prefix(95)) + " Copy",
                                      hardware: original.hardware, installation: original.installation,
-                                     capacityGiB: original.capacityGiB, mediaID: original.mediaID, usesTPM: original.usesTPM)
+                                     capacityGiB: original.capacityGiB, mediaID: original.mediaID, usesTPM: original.usesTPM,
+                                     installationMethod: original.installationMethod)
         try publish(machine) { stage in
             try copyMachineFiles(from: directory(for: original), to: stage, copyDisk: copyDisk)
         }
