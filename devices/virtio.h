@@ -15,9 +15,10 @@
 #define HV_VIRTIO_F_VERSION_1 (1ull << 32)
 
 typedef struct HvVirtq {
-    uint16_t size, enabled, last_avail;
+    uint16_t size, enabled, last_avail, vector;
     uint64_t desc, avail, used;
     uint8_t out[HV_VIRTQ_MAX_SIZE]; /* heads taken and not yet completed (a completion twice corrupts the driver) */
+    uint16_t used_index;
 } HvVirtq;
 
 typedef struct HvVirtqSeg {
@@ -38,12 +39,14 @@ typedef struct HvVirtio {
     uint64_t features, driver_features;
     uint32_t dfsel, gfsel;
     uint8_t status, isr, config_gen;
-    uint16_t qsel, nq;
+    uint16_t qsel, nq, config_vector;
+    uint8_t strict_dma;
     HvVirtq q[HV_VIRTQ_MAX];
     uint8_t config[256];
     uint32_t config_len;
     void (*notify)(struct HvVirtio *v, int q);
     void (*config_write)(struct HvVirtio *v, uint32_t off, uint64_t val, unsigned size);
+    void (*reset_device)(struct HvVirtio *v);
     void *dev;
 } HvVirtio;
 
@@ -55,6 +58,9 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
 int hv_virtq_pop(HvVirtio *v, int q, HvVirtqElem *e);
 void hv_virtq_push(HvVirtio *v, int q, const HvVirtqElem *e, uint32_t written);
 void hv_virtio_interrupt(HvVirtio *v);
+void hv_virtio_queue_interrupt(HvVirtio *v, int q);
+void hv_virtio_reset(HvVirtio *v);
+void *hv_virtio_dma_ptr(HvVirtio *v, uint64_t addr, uint64_t len);
 
 /* Copy between an element's buffers and host memory, skipping `off` bytes of
    the readable (to) or writable (from) segments. Return bytes copied. */

@@ -31,14 +31,17 @@ static void add_cap(HvVirtio *v, uint8_t at, uint8_t next, uint8_t type, uint32_
     }
 }
 
-static void reset(HvVirtio *v) {
+void hv_virtio_reset(HvVirtio *v) {
     v->driver_features = 0;
     v->dfsel = v->gfsel = 0;
     v->status = 0;
     v->isr = 0;
     v->qsel = 0;
-    for (int i = 0; i < v->nq; i++) v->q[i] = (HvVirtq){.size = HV_VIRTQ_MAX_SIZE};
+    v->config_vector = 0xffff;
+    v->pci.msix_pba = 0;
+    for (int i = 0; i < v->nq; i++) v->q[i] = (HvVirtq){.size = HV_VIRTQ_MAX_SIZE, .vector = 0xffff};
     hv_pci_set_intx(&v->pci, 0);
+    if (v->reset_device) v->reset_device(v);
 }
 
 static uint64_t common_read(HvVirtio *v, uint64_t off) {
@@ -48,13 +51,13 @@ static uint64_t common_read(HvVirtio *v, uint64_t off) {
     case 0x04: return v->dfsel < 2 ? (uint32_t)(v->features >> (32 * v->dfsel)) : 0;
     case 0x08: return v->gfsel;
     case 0x0c: return v->gfsel < 2 ? (uint32_t)(v->driver_features >> (32 * v->gfsel)) : 0;
-    case 0x10: return 0xffff;                  /* config_msix_vector: no MSI-X */
+    case 0x10: return v->config_vector;
     case 0x12: return v->nq;
     case 0x14: return v->status;
     case 0x15: return v->config_gen;
     case 0x16: return v->qsel;
     case 0x18: return q ? q->size : 0;
-    case 0x1a: return 0xffff;
+    case 0x1a: return q ? q->vector : 0xffff;
     case 0x1c: return q ? q->enabled : 0;
     case 0x1e: return v->qsel;                 /* queue_notify_off = queue index */
     case 0x20: return q ? (uint32_t)q->desc : 0;
@@ -81,15 +84,24 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
     case 0x0c:
         if (v->gfsel < 2) {
             uint64_t mask = 0xffffffffull << (32 * v->gfsel);
-            v->driver_features = (v->driver_features & ~mask) | (((uint64_t)(uint32_t)val << (32 * v->gfsel)) & v->features);
+            if (v->strict_dma && (v->status & 8)) break;
+            uint64_t requested = (uint64_t)(uint32_t)val << (32 * v->gfsel);
+            v->driver_features = (v->driver_features & ~mask) | (v->strict_dma ? requested : requested & v->features);
         }
         break;
     case 0x14:
-        if ((uint8_t)val == 0) reset(v);
-        else v->status = (uint8_t)val;
+        if ((uint8_t)val == 0) hv_virtio_reset(v);
+        else {
+            v->status = (uint8_t)val;
+            if (v->strict_dma && (!(v->driver_features & HV_VIRTIO_F_VERSION_1) ||
+                                  (v->driver_features & ~v->features))) v->status &= ~8u;
+            if (v->strict_dma && !(v->status & 8)) v->status &= ~4u;
+        }
         break;
+    case 0x10: v->config_vector = val < v->pci.msix_nvec ? (uint16_t)val : 0xffff; break;
     case 0x16: v->qsel = (uint16_t)val; break;
     case 0x18:
+        if (v->strict_dma && q && q->enabled) break;
         if (q && val && val <= HV_VIRTQ_MAX_SIZE && !(val & (val - 1))) q->size = (uint16_t)val;
         else if (q) /* the driver would index its rings by a size we do not use: say so */
             fprintf(stderr, "virtio %04x: queue %u size %llu refused (max %d)\n", v->pci.config[2] | v->pci.config[3] << 8,
@@ -97,10 +109,11 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
         if (getenv("HV_VIRTIO_CFG_LOG"))
             fprintf(stderr, "virtio %04x: queue %u size %llu\n", v->pci.config[2] | v->pci.config[3] << 8, v->qsel, (unsigned long long)val);
         break;
-    case 0x1c: if (q) q->enabled = val & 1; break;
-    case 0x20: case 0x24: if (q) set64(&q->desc, off, val, size); break;
-    case 0x28: case 0x2c: if (q) set64(&q->avail, off, val, size); break;
-    case 0x30: case 0x34: if (q) set64(&q->used, off, val, size); break;
+    case 0x1a: if (q) q->vector = val < v->pci.msix_nvec ? (uint16_t)val : 0xffff; break;
+    case 0x1c: if (q && (!v->strict_dma || !q->enabled)) q->enabled = val & 1; break;
+    case 0x20: case 0x24: if (q && (!v->strict_dma || !q->enabled)) set64(&q->desc, off, val, size); break;
+    case 0x28: case 0x2c: if (q && (!v->strict_dma || !q->enabled)) set64(&q->avail, off, val, size); break;
+    case 0x30: case 0x34: if (q && (!v->strict_dma || !q->enabled)) set64(&q->used, off, val, size); break;
     default: break;
     }
 }
@@ -138,7 +151,8 @@ static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t val, unsigned
         if (v->config_write) v->config_write(v, (uint32_t)(off - DEVICE), val, size);
     } else if (off >= NOTIFY) {
         int q = (int)((off - NOTIFY) / NOTIFY_MULT);
-        if (q < v->nq && v->q[q].enabled && (v->status & 4) && v->notify) v->notify(v, q); /* DRIVER_OK */
+        if (q < v->nq && v->q[q].enabled && (v->status & 4) && v->notify &&
+            (!v->strict_dma || !(v->status & 0xc0))) v->notify(v, q);
     }
 }
 
@@ -158,7 +172,7 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
     add_cap(v, 0x50, 0x60, 3, ISR, 1);
     add_cap(v, 0x60, 0x70, 4, DEVICE, 0x100);
     add_cap(v, 0x70, 0x00, 2, NOTIFY, NOTIFY_MULT * HV_VIRTQ_MAX);
-    reset(v);
+    hv_virtio_reset(v);
 }
 
 void hv_virtio_interrupt(HvVirtio *v) {
@@ -166,17 +180,62 @@ void hv_virtio_interrupt(HvVirtio *v) {
     hv_pci_set_intx(&v->pci, 1);
 }
 
+void hv_virtio_queue_interrupt(HvVirtio *v, int q) {
+    if (v->strict_dma) {
+        uint16_t *flags = hv_virtio_dma_ptr(v, v->q[q].avail, sizeof(*flags));
+        if (flags && (__atomic_load_n(flags, __ATOMIC_ACQUIRE) & 1)) return;
+    }
+    if (hv_pci_msix_enabled(&v->pci)) {
+        hv_pci_msix_notify(&v->pci, v->q[q].vector);
+    } else {
+        hv_virtio_interrupt(v);
+    }
+}
+
+void *hv_virtio_dma_ptr(HvVirtio *v, uint64_t addr, uint64_t len) {
+    if (!v->strict_dma) return hv_phys_ptr(v->m, addr, len);
+    HvRam *ram = hv_ram_lookup(v->m, addr);
+    if (!ram || ram->readonly || len > ram->size - (addr - ram->pa)) return NULL;
+    return ram->host + (addr - ram->pa);
+}
+
+static void queue_needs_reset(HvVirtio *v) {
+    v->status |= 64; /* DEVICE_NEEDS_RESET */
+    if (hv_pci_msix_enabled(&v->pci)) hv_pci_msix_notify(&v->pci, v->config_vector);
+    else {
+        v->isr |= 2;
+        hv_pci_set_intx(&v->pci, 1);
+    }
+}
+
 int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
     HvVirtq *q = &v->q[qi];
-    uint16_t *avail = hv_phys_ptr(v->m, q->avail, 4 + 2u * q->size);
-    if (!avail) return 0; /* not set up: nothing taken (-1 means an element was taken but is broken) */
+    if (v->strict_dma && ((q->avail & 1) || (q->desc & 15) || (q->used & 3) ||
+                          !hv_virtio_dma_ptr(v, q->desc, 16u * q->size) ||
+                          !hv_virtio_dma_ptr(v, q->used, 4 + 8u * q->size))) {
+        queue_needs_reset(v);
+        return 0;
+    }
+    uint16_t *avail = hv_virtio_dma_ptr(v, q->avail, 4 + 2u * q->size);
+    if (!avail) {
+        if (v->strict_dma) queue_needs_reset(v);
+        return 0;
+    }
     uint16_t idx = __atomic_load_n(&avail[1], __ATOMIC_ACQUIRE);
     if (q->last_avail == idx) return 0;
+    if (v->strict_dma && (uint16_t)(idx - q->last_avail) > q->size) {
+        queue_needs_reset(v);
+        return 0;
+    }
     /* The guest writes the ring entry (and the descriptors) before the index,
        from another core: the acquire above keeps these reads after it, or a
        stale entry (the driver fills unused ones with 0xffff) comes back. */
     uint16_t head = __atomic_load_n(&avail[2 + q->last_avail % q->size], __ATOMIC_RELAXED);
     if (head >= q->size) {
+        if (v->strict_dma) {
+            queue_needs_reset(v);
+            return 0;
+        }
         /* Not written yet as far as this core can see (the driver keeps unused
            entries at 0xffff). Taking it would complete a request that does not
            exist (the guest panics "Adding invalid index 65535") or lose the
@@ -189,6 +248,7 @@ int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
     }
     q->last_avail++;
     if (q->out[head]) {
+        if (v->strict_dma) return 0;
         static int said;
         if (said++ < 10)
             fprintf(stderr, "virtio %04x q%d: head %u taken again while still outstanding\n",
@@ -200,9 +260,10 @@ int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
     uint64_t table = q->desc;
     uint32_t count = q->size;
     uint16_t i = head;
+    int seen_writable = 0;
     for (uint32_t steps = 0; steps < HV_VIRTQ_MAX_SEGS; steps++) {
         if (i >= count) return -1;
-        uint8_t *d = hv_phys_ptr(v->m, table + 16u * i, 16);
+        uint8_t *d = hv_virtio_dma_ptr(v, table + 16u * i, 16);
         if (!d) return -1;
         uint64_t addr;
         uint32_t len;
@@ -211,6 +272,10 @@ int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
         memcpy(&len, d + 8, 4);
         memcpy(&flags, d + 12, 2);
         memcpy(&next, d + 14, 2);
+        if (v->strict_dma && ((flags & ~(DESC_F_NEXT | DESC_F_WRITE)) ||
+                              (seen_writable && !(flags & DESC_F_WRITE)) ||
+                              (len && !hv_virtio_dma_ptr(v, addr, len)))) return -1;
+        if (flags & DESC_F_WRITE) seen_writable = 1;
         if (flags & DESC_F_INDIRECT) { /* not offered, but harmless to follow */
             table = addr;
             count = len / 16;
@@ -237,16 +302,25 @@ void hv_virtq_push(HvVirtio *v, int qi, const HvVirtqElem *e, uint32_t written) 
         return;
     }
     q->out[e->head] = 0;
-    uint8_t *used = hv_phys_ptr(v->m, q->used, 4 + 8u * q->size);
+    uint8_t *used = hv_virtio_dma_ptr(v, q->used, 4 + 8u * q->size);
     if (!used) return;
     uint16_t idx;
-    memcpy(&idx, used + 2, 2);
+    if (v->strict_dma) idx = q->used_index;
+    else memcpy(&idx, used + 2, 2);
     uint32_t id = e->head;
-    memcpy(used + 4 + 8u * (idx % q->size), &id, 4);
-    memcpy(used + 8 + 8u * (idx % q->size), &written, 4);
+    uint32_t offset = 4 + 8u * (idx % q->size);
+    if (v->strict_dma) {
+        hv_dma_written(v->m, q->used + offset, 8);
+        hv_dma_written(v->m, q->used + 2, 2);
+    }
+    memcpy(used + offset, &id, 4);
+    memcpy(used + offset + 4, &written, 4);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     idx++;
-    memcpy(used + 2, &idx, 2);
+    if (v->strict_dma) {
+        q->used_index = idx;
+        __atomic_store_n((uint16_t *)(used + 2), idx, __ATOMIC_RELEASE);
+    } else memcpy(used + 2, &idx, 2);
 }
 
 static uint32_t copy(HvVirtio *v, const HvVirtqElem *e, int writable, uint32_t off, uint8_t *buf, uint32_t len) {
@@ -260,10 +334,13 @@ static uint32_t copy(HvVirtio *v, const HvVirtqElem *e, int writable, uint32_t o
         }
         uint32_t n = g->len - off;
         if (n > len - done) n = len - done;
-        uint8_t *p = hv_phys_ptr(v->m, g->addr + off, n);
+        if (v->strict_dma && g->addr > UINT64_MAX - off) break;
+        uint8_t *p = hv_virtio_dma_ptr(v, g->addr + off, n);
         if (!p) break;
-        if (writable) memcpy(p, buf + done, n);
-        else memcpy(buf + done, p, n);
+        if (writable) {
+            if (v->strict_dma) hv_dma_written(v->m, g->addr + off, n);
+            memcpy(p, buf + done, n);
+        } else memcpy(buf + done, p, n);
         done += n;
         off = 0;
     }

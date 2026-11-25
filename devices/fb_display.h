@@ -24,14 +24,21 @@ typedef struct HvFbDisplay {
     uint32_t stride;
     uint32_t fourcc; /* DRM fourcc, e.g. XR24 / AR24 (32-bit BGRX) */
     int active;
+    uint8_t *scanout;
+    uint32_t scanout_width, scanout_height;
+    uint64_t scanout_serial;
 
     /* Metal presenter handle (created lazily by fb_metal.m) */
     void *metal;
 } HvFbDisplay;
 
 HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg);
-/* Thread-safe snapshot of current scanout pointer and dimensions; returns 0 if active, -1 if not yet set. */
-int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride);
+/* A successful borrow holds the display lock. Release after copying or uploading pixels. */
+int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h,
+                                uint32_t *stride, uint64_t *scanout_serial);
+void hv_fb_display_release_frame(HvFbDisplay *fb);
+/* Takes ownership of a tightly packed BGRA scanout, or falls back to RAMFB with NULL. */
+void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uint32_t h);
 
 /* Metal layer presentation & PNG screenshot helpers (implemented in devices/fb_metal.m) */
 void hv_fb_metal_set_layer(HvFbDisplay *fb, void *ca_metal_layer);

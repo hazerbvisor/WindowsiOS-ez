@@ -39,7 +39,7 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
 
     if (width < 64 || width > 8192 || height < 64 || height > 8192) return;
     if (stride == 0) stride = width * 4;
-    if (stride < width * 2 || stride > 65536) return;
+    if (stride < width * 4 || stride > 65536) return;
 
     uint64_t total_bytes = (uint64_t)stride * (height - 1) + (uint64_t)width * 4;
     void *host_ptr = hv_phys_ptr(fb->m, addr, total_bytes);
@@ -65,6 +65,7 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
 
 HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     HvFbDisplay *fb = calloc(1, sizeof *fb);
+    if (!fb) return NULL;
     fb->m = m;
     pthread_mutex_init(&fb->mu, NULL);
     if (fw_cfg) {
@@ -73,9 +74,18 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
-int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride) {
+int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h,
+                                uint32_t *stride, uint64_t *scanout_serial) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);
+    if (fb->scanout) {
+        *pixels = fb->scanout;
+        *w = fb->scanout_width;
+        *h = fb->scanout_height;
+        *stride = *w * 4;
+        if (scanout_serial) *scanout_serial = fb->scanout_serial;
+        return 0;
+    }
     if (!fb->active || !fb->fb_host || !fb->width || !fb->height) {
         pthread_mutex_unlock(&fb->mu);
         return -1;
@@ -84,6 +94,21 @@ int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w
     *w = fb->width;
     *h = fb->height;
     *stride = fb->stride;
-    pthread_mutex_unlock(&fb->mu);
+    if (scanout_serial) *scanout_serial = 0;
     return 0;
+}
+
+void hv_fb_display_release_frame(HvFbDisplay *fb) {
+    pthread_mutex_unlock(&fb->mu);
+}
+
+void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uint32_t h) {
+    pthread_mutex_lock(&fb->mu);
+    uint8_t *old = fb->scanout;
+    fb->scanout = pixels;
+    fb->scanout_width = w;
+    fb->scanout_height = h;
+    if (++fb->scanout_serial == 0) fb->scanout_serial++;
+    pthread_mutex_unlock(&fb->mu);
+    free(old);
 }

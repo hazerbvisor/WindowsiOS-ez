@@ -29,12 +29,13 @@ typedef struct HvWinVmConfig {
 } HvWinVmConfig;
 
 int hv_winvm_create(const HvWinVmConfig *cfg, char *err, size_t errlen);
-void hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason));
+int hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason));
 int hv_winvm_run_cpu0(void);
 void hv_winvm_stop(void);
 void hv_winvm_power_button(void);
 void hv_winvm_flush_disks(void);
 void hv_winvm_storage_diagnostics(char *buffer, size_t capacity);
+void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity);
 
 /* Display & screenshot hooks (any thread) */
 void hv_winvm_set_display_layer(void *ca_metal_layer);

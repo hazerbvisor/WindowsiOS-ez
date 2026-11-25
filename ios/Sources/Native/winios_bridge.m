@@ -383,7 +383,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
     if (jitMiB == 0 || jitMiB > self.maximumJITMiB || cpus < 1 || cpus > HV_MAX_CPUS) {
-        [self reportStartFailure:@"This build accepts 1–1536 MiB of JIT cache and one to four vCPUs. Choose Compatibility or change the hardware settings."];
+        [self reportStartFailure:[NSString stringWithFormat:@"This build accepts 1–%llu MiB of JIT cache and 1–%d vCPUs. Choose Compatibility or change the hardware settings.",
+                                                           (unsigned long long)self.maximumJITMiB, HV_MAX_CPUS]];
         return;
     }
 
@@ -566,7 +567,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
                  installer ? @"Windows Setup session" : @"Windows 11 ARM64 session", _configuredCPUs, _configuredRamMB];
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
 
-    hv_winvm_start(1, vm_exit_trampoline);
+    int startError = hv_winvm_start(1, vm_exit_trampoline);
+    if (startError) {
+        _vmRunning = NO;
+        [[UIApplication sharedApplication] setIdleTimerDisabled:NO];
+        [self reportStartFailure:[NSString stringWithFormat:@"Could not start VM threads for %d vCPUs: %s. Reopen the app and try fewer virtual CPUs.",
+                                                           _configuredCPUs, strerror(startError)]];
+        return;
+    }
 
     [self startDiagTimer];
     dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -736,8 +744,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         (long)hingeStatus,
         hingeDeg,
         pt.width, pt.height, scale];
-    [[txt stringByAppendingString:storageStatus] writeToFile:statusFile atomically:YES
-                                                   encoding:NSUTF8StringEncoding error:nil];
+    char graphics[1024];
+    hv_winvm_graphics_diagnostics(graphics, sizeof graphics);
+    NSString *graphicsStatus = [NSString stringWithUTF8String:graphics] ?: @"";
+    NSString *report = [NSString stringWithFormat:@"%@%@%@", txt, graphicsStatus, storageStatus];
+    [report writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)handleVMExitWithReason:(NSString *)reason {

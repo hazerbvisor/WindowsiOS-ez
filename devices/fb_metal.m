@@ -47,6 +47,7 @@ static NSString *const kFbShaderSource =
     unsigned fps;
     _Atomic(uint64_t) framesPresented;
     uint64_t lastHash;
+    uint64_t lastScanoutSerial;
     CGSize lastDrawableSize;
 }
 - (instancetype)initWithDisplay:(HvFbDisplay *)display;
@@ -83,6 +84,7 @@ static NSString *const kFbShaderSource =
     os_unfair_lock_lock(&lock);
     layer = newLayer;
     lastHash = 0;
+    lastScanoutSerial = 0;
     lastDrawableSize = CGSizeZero;
     if (layer && device) {
         dispatch_block_t cfg = ^{
@@ -137,8 +139,6 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
     @autoreleasepool {
         const uint8_t *px = NULL;
         uint32_t w = 0, h = 0, stride = 0;
-        if (hv_fb_display_get_frame(fb, &px, &w, &h, &stride) != 0) return;
-
         os_unfair_lock_lock(&lock);
         CAMetalLayer *curLayer = layer;
         if (!curLayer || !device || !pipeline || !queue) {
@@ -152,9 +152,16 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
             return;
         }
 
-        uint64_t hval = quick_frame_hash(px, w, h, stride);
+        uint64_t scanoutSerial = 0;
+        if (hv_fb_display_acquire_frame(fb, &px, &w, &h, &stride, &scanoutSerial) != 0) {
+            os_unfair_lock_unlock(&lock);
+            return;
+        }
+
+        uint64_t hval = scanoutSerial ? 0 : quick_frame_hash(px, w, h, stride);
         BOOL sizeChanged = !CGSizeEqualToSize(dsize, lastDrawableSize);
-        if (hval == lastHash && !sizeChanged && texW == w && texH == h) {
+        if (texture && scanoutSerial == lastScanoutSerial && hval == lastHash && !sizeChanged && texW == w && texH == h) {
+            hv_fb_display_release_frame(fb);
             os_unfair_lock_unlock(&lock);
             return;
         }
@@ -166,6 +173,11 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
                                                                                       mipmapped:NO];
             td.usage = MTLTextureUsageShaderRead;
             texture = [device newTextureWithDescriptor:td];
+            if (!texture) {
+                hv_fb_display_release_frame(fb);
+                os_unfair_lock_unlock(&lock);
+                return;
+            }
             texW = w;
             texH = h;
         }
@@ -174,6 +186,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
                    mipmapLevel:0
                      withBytes:px
                    bytesPerRow:stride];
+        hv_fb_display_release_frame(fb);
 
         id<CAMetalDrawable> drawable = [curLayer nextDrawable];
         if (!drawable) {
@@ -207,6 +220,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         [cb commit];
 
         lastHash = hval;
+        lastScanoutSerial = scanoutSerial;
         lastDrawableSize = dsize;
         atomic_fetch_add_explicit(&framesPresented, 1, memory_order_relaxed);
         os_unfair_lock_unlock(&lock);
@@ -247,23 +261,29 @@ int hv_fb_save_png(HvFbDisplay *fb, const char *path) {
     if (!fb || !path) return -1;
     const uint8_t *px = NULL;
     uint32_t w = 0, h = 0, stride = 0;
-    if (hv_fb_display_get_frame(fb, &px, &w, &h, &stride) != 0) return -1;
+    if (hv_fb_display_acquire_frame(fb, &px, &w, &h, &stride, NULL) != 0) return -1;
 
     @autoreleasepool {
-        size_t total = (size_t)stride * h;
+        uint32_t rowBytes = w * 4;
+        size_t total = (size_t)rowBytes * h;
         uint8_t *copy = malloc(total);
-        if (!copy) return -1;
-        memcpy(copy, px, total);
+        if (!copy) {
+            hv_fb_display_release_frame(fb);
+            return -1;
+        }
+        for (uint32_t y = 0; y < h; y++)
+            memcpy(copy + (size_t)y * rowBytes, px + (size_t)y * stride, rowBytes);
+        hv_fb_display_release_frame(fb);
         /* Ensure alpha byte is 0xff (XRGB8888 leaves X=0x00) */
         for (uint32_t y = 0; y < h; y++) {
-            uint8_t *row = copy + (size_t)y * stride;
+            uint8_t *row = copy + (size_t)y * rowBytes;
             for (uint32_t x = 0; x < w; x++) row[x * 4 + 3] = 0xff;
         }
 
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGDataProviderRef prov = CGDataProviderCreateWithData(NULL, copy, total, NULL);
         CGBitmapInfo bmi = kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaNoneSkipFirst;
-        CGImageRef img = CGImageCreate(w, h, 8, 32, stride, cs, bmi, prov, NULL, false, kCGRenderingIntentDefault);
+        CGImageRef img = CGImageCreate(w, h, 8, 32, rowBytes, cs, bmi, prov, NULL, false, kCGRenderingIntentDefault);
         int rc = -1;
         if (img) {
             NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];

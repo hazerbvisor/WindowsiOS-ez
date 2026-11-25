@@ -26,6 +26,7 @@
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
+static char stopped_graphics[768];
 static pthread_t sec_threads[HV_MAX_CPUS];
 static int ncpus = 1;
 static HvWinVirt board;
@@ -147,7 +148,8 @@ int hv_winvm_display_size(uint32_t *w, uint32_t *h) {
     if (!fb) return -1;
     const uint8_t *px = NULL;
     uint32_t fw = 0, fh = 0, st = 0;
-    if (hv_fb_display_get_frame(fb, &px, &fw, &fh, &st) != 0) return -1;
+    if (hv_fb_display_acquire_frame(fb, &px, &fw, &fh, &st, NULL) != 0) return -1;
+    hv_fb_display_release_frame(fb);
     if (w) *w = fw;
     if (h) *h = fh;
     return 0;
@@ -234,6 +236,11 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
             return -1;
         }
         if (board_result == -4) return fail(err, errlen, "Cannot initialize the virtual NVMe disks.");
+        if (board_result == -5) {
+            if (err && errlen) snprintf(err, errlen, "Cannot allocate guest memory metadata for %llu MiB.",
+                                       (unsigned long long)(ram_bytes >> 20));
+            return -1;
+        }
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
 #if TARGET_OS_IPHONE
@@ -294,14 +301,18 @@ static void *secondary_thread(void *arg) {
     return NULL;
 }
 
-static void spawn_secondaries(void) {
+static int spawn_secondaries(void) {
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 8u << 20);
-    for (int i = 1; i < ncpus; i++) {
-        pthread_create(&sec_threads[i], &attr, secondary_thread, &cpus[i]);
+    int error = pthread_attr_init(&attr);
+    if (error) return error;
+    error = pthread_attr_setstacksize(&attr, 8u << 20);
+    for (int i = 1; !error && i < ncpus; i++) {
+        pthread_t thread;
+        error = pthread_create(&thread, &attr, secondary_thread, &cpus[i]);
+        if (!error) sec_threads[i] = thread;
     }
     pthread_attr_destroy(&attr);
+    return error;
 }
 
 static void join_secondaries(void) {
@@ -342,6 +353,18 @@ void hv_winvm_storage_diagnostics(char *buffer, size_t capacity) {
     hv_nvme_diagnostics(board.nvme_logs, buffer + used, capacity - used);
 }
 
+void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity) {
+    if (!capacity) return;
+    if (!atomic_load_explicit(&display_fb, memory_order_acquire)) {
+        *buffer = '\0';
+        return;
+    }
+    hv_dev_lock(&m);
+    if (*stopped_graphics) snprintf(buffer, capacity, "graphics_last_session:\n%s", stopped_graphics);
+    else hv_virtio_gpu_diagnostics(board.gpu, buffer, capacity);
+    hv_dev_unlock(&m);
+}
+
 int hv_winvm_run_cpu0(void) {
     prepare_cpu_thread();
     for (;;) {
@@ -379,7 +402,10 @@ int hv_winvm_run_cpu0(void) {
                 pthread_mutex_unlock(&board.gic->mu);
             }
             hv_gicv3_its_reset(board.its);
+            hv_dev_lock(&m);
             hv_pcie_reset(board.pcie);
+            hv_virtio_gpu_reset(board.gpu);
+            hv_dev_unlock(&m);
             hv_nvme_reset(board.nvme0);
             hv_nvme_reset(board.nvme1);
             hv_nvme_reset(board.nvme_logs);
@@ -388,25 +414,38 @@ int hv_winvm_run_cpu0(void) {
                 board.flash1->wcycle = 0;
                 board.flash1->status = 0x80;
             }
-            if (board.fb) board.fb->active = 0;
+            if (board.fb) {
+                pthread_mutex_lock(&board.fb->mu);
+                board.fb->active = 0;
+                pthread_mutex_unlock(&board.fb->mu);
+            }
             if (hv_winvirt_reset_tpm(&board) != 0) {
                 fprintf(stderr, "winvm: TPM 2.0 reset failed; stopping the VM\n");
                 return HV_EXIT_HALT;
             }
             hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;
-            spawn_secondaries();
+            if (spawn_secondaries() != 0) {
+                fprintf(stderr, "winvm: could not restart guest vCPU threads\n");
+                join_secondaries();
+                return HV_EXIT_HALT;
+            }
             continue;
         }
         return r;
     }
 }
 
-static void *cpu0_thread(void *unused) {
-    (void)unused;
-    int r = hv_winvm_run_cpu0();
+static void finish_session(void) {
     int was_stopping = atomic_exchange(&stop_requested, 1);
     join_secondaries();
+    hv_dev_lock(&m);
+    if (board.gpu) {
+        hv_virtio_gpu_diagnostics(board.gpu, stopped_graphics, sizeof stopped_graphics);
+        hv_virtio_gpu_destroy(board.gpu);
+        board.gpu = NULL;
+    }
+    hv_dev_unlock(&m);
     hv_winvm_flush_disks();
     hv_winvirt_close_tpm(&board);
     pthread_mutex_lock(&disk_checkpoint_lock);
@@ -417,25 +456,37 @@ static void *cpu0_thread(void *unused) {
     setup_disk_path = NULL;
 #endif
     if (!was_stopping) hv_audio_shutdown();
+}
+
+static void *cpu0_thread(void *unused) {
+    (void)unused;
+    int r = hv_winvm_run_cpu0();
+    finish_session();
     if (exit_cb) exit_cb(r);
     return NULL;
 }
 
-void hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason)) {
+int hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason)) {
     exit_cb = on_exit;
-    spawn_secondaries();
+    int error = spawn_secondaries();
     pthread_t kt;
-    pthread_create(&kt, NULL, kicker_thread, NULL);
-    pthread_detach(kt);
-    if (spawn_cpu0) {
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setstacksize(&attr, 8u << 20);
-        pthread_t ct;
-        pthread_create(&ct, &attr, cpu0_thread, NULL);
-        pthread_detach(ct);
-        pthread_attr_destroy(&attr);
+    if (!error) {
+        error = pthread_create(&kt, NULL, kicker_thread, NULL);
+        if (!error) pthread_detach(kt);
     }
+    if (!error && spawn_cpu0) {
+        pthread_attr_t attr;
+        error = pthread_attr_init(&attr);
+        if (!error) {
+            error = pthread_attr_setstacksize(&attr, 8u << 20);
+            pthread_t ct;
+            if (!error) error = pthread_create(&ct, &attr, cpu0_thread, NULL);
+            if (!error) pthread_detach(ct);
+            pthread_attr_destroy(&attr);
+        }
+    }
+    if (error) finish_session();
+    return error;
 }
 
 void hv_winvm_stop(void) {

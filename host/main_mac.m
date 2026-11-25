@@ -565,7 +565,11 @@ int main(int argc, char **argv) {
     if (headless) {
         fprintf(stderr, "winvm: starting headless (%d vCPUs, %llu MB RAM)...\n",
                 cfg.ncpus, (unsigned long long)cfg.ram_mb);
-        hv_winvm_start(0, NULL);
+        int error = hv_winvm_start(0, NULL);
+        if (error) {
+            fprintf(stderr, "winvm: could not start VM threads: %s\n", strerror(error));
+            return 1;
+        }
         int r = hv_winvm_run_cpu0();
         fprintf(stderr, "\nwinvm: stopped (%s)\n", g_sig_stop ? "interrupted" : hv_winvm_reason_name(r));
         if (targs.screenshot_path && targs.screenshot_after == 0) {
@@ -581,7 +585,11 @@ int main(int argc, char **argv) {
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];
         WinVmAppDelegate *del = [[WinVmAppDelegate alloc] init];
         app.delegate = del;
-        hv_winvm_start(1, on_vm_exit_gui);
+        int error = hv_winvm_start(1, on_vm_exit_gui);
+        if (error) {
+            fprintf(stderr, "winvm: could not start VM threads: %s\n", strerror(error));
+            return 1;
+        }
         [app run];
     }
     return 0;

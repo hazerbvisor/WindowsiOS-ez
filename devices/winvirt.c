@@ -115,6 +115,7 @@ static uint64_t tick_locked(HvMachine *m, HvCpu *cpu) {
     hv_xhci_poll(b->usb);
     if (b->hda) hv_hda_poll(b->hda);
     if (b->snd) hv_virtio_snd_poll(b->snd);
+    if (b->gpu) hv_virtio_gpu_poll(b->gpu);
     return deadline;
 }
 
@@ -201,7 +202,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     }
 
     /* 4. Register Guest RAM at 0x40000000 */
-    hv_machine_add_ram(m, WINVIRT_RAM_PA, ram_size, b->ram, 0);
+    if (hv_machine_add_ram(m, WINVIRT_RAM_PA, ram_size, b->ram, 0) != 0) return -5;
 
     /* 5. Interrupt controller: GICv3 + GICv3 ITS (LPI MSI-X for NVMe, xHCI, VirtIO) */
     b->gic = hv_gicv3_create(m, WINVIRT_GIC_DIST_PA, WINVIRT_GIC_REDIST_PA);
@@ -242,6 +243,12 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     if (setup_logs) b->nvme_logs = hv_nvme_create(m, b->pcie, setup_logs, "WINIOSLOG");
     if ((disk0 && !b->nvme0) || (disk1 && !b->nvme1) || (setup_logs && !b->nvme_logs))
         return -4;
+    const char *graphics = getenv("WINIOS_VIRTIO_GPU");
+    if (disk0 && !disk1 && !setup_logs && graphics && !strcmp(graphics, "1")) {
+        b->gpu = hv_virtio_gpu_create(m, b->pcie, b->fb);
+        fprintf(stderr, "winvm: %s\n", b->gpu ? "experimental VirtIO-GPU enabled (2D only)"
+                                            : "VirtIO-GPU initialization failed; using RAMFB");
+    }
     (void)enable_sound;
 
     m->tick = tick;

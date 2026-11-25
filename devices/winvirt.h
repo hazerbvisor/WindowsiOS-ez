@@ -19,6 +19,7 @@
 #include "pl031.h"
 #include "pl061.h"
 #include "hda.h"
+#include "virtio_gpu.h"
 #include "virtio_net.h"
 #include "virtio_snd.h"
 #include "xhci.h"
@@ -77,6 +78,7 @@ typedef struct HvWinVirt {
     HvFbDisplay *fb;
     HvPcie *pcie;
     HvVirtioNet *net;
+    HvVirtioGpu *gpu;
     HvNvme *nvme0;
     HvNvme *nvme1;
     HvNvme *nvme_logs;
