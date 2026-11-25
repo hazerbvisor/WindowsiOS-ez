@@ -1,4 +1,4 @@
-name: Publish MetalGPU driver installer
+name: Publish MetalGPU driver installer R2
 on:
   push:
     branches: [build/metalgpu-driver-release]
@@ -15,8 +15,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify official driver and installer syntax
-        shell: bash
+      - name: Verify upstream driver archive and installer
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
@@ -24,23 +23,20 @@ jobs:
           echo "723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f  $work/driver.zip" | sha256sum -c -
           python3 - "$work" <<'PY'
           import pathlib, sys, zipfile
-          p=pathlib.Path(sys.argv[1])
-          z=p/"driver.zip"
-          assert z.stat().st_size==2784710
-          with zipfile.ZipFile(z) as archive:
-              assert archive.testzip() is None
-              inf=[n for n in archive.namelist() if n.rsplit("/",1)[-1].lower()=="viogpu3d.inf"]
-              assert len(inf)==1, inf
-          cmd=pathlib.Path("drivers/WindowsiOS-ez-MetalGPU-Driver.cmd").read_text()
-          prefix='powershell.exe -NoLogo -NoProfile -Command "'
-          lines=[line for line in cmd.splitlines() if line.startswith(prefix)]
-          assert len(lines)==1 and lines[0].endswith('"')
-          (p/"verify.ps1").write_text(lines[0][len(prefix):-1])
+          z=pathlib.Path(sys.argv[1])/"driver.zip"
+          assert z.stat().st_size == 2784710
+          with zipfile.ZipFile(z) as a:
+              assert a.testzip() is None
+              assert len([n for n in a.namelist() if n.rsplit("/",1)[-1].lower()=="viogpu3d.inf"]) == 1
+          s=pathlib.Path("drivers/WindowsiOS-ez-MetalGPU-Driver.cmd").read_bytes()
+          assert s.startswith(b"@echo off")
+          assert b"powershell" not in s.lower()
+          assert b"723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f" in s
+          assert b"pnputil.exe /add-driver" in s
           PY
-          VERIFY_PS1="$work/verify.ps1" pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:VERIFY_PS1,[ref]$tokens,[ref]$errors); if($errors.Count){$errors | Out-String | Write-Error; exit 1}'
-      - name: Publish separate experimental driver release
+      - name: Publish R2 installer
         run: |
           set -euo pipefail
           cd drivers
           sha256sum WindowsiOS-ez-MetalGPU-Driver.cmd > SHA256SUMS
-          gh release create metalgpu-driver-v0.6 WindowsiOS-ez-MetalGPU-Driver.cmd SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "MetalGPU Driver Installer (Windows ARM64)" --notes-file README.md --prerelease --latest=false
+          gh release create metalgpu-driver-v0.6-r2 WindowsiOS-ez-MetalGPU-Driver.cmd SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "MetalGPU Driver Installer v0.6 R2 (Windows ARM64)" --notes-file README.md --prerelease --latest=false

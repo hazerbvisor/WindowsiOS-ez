@@ -1,9 +1,56 @@
 @echo off
 setlocal DisableDelayedExpansion
-set "METALGPU_INSTALLER_DIR=%~dp0"
-title WindowsiOS-ez MetalGPU Driver Installer
-powershell.exe -NoLogo -NoProfile -Command "$ErrorActionPreference='Stop'; $dir=$null; try { $identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $principal=[Security.Principal.WindowsPrincipal]::new($identity); if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){ throw 'Right-click this installer and choose Run as administrator.' }; if(-not (Get-CimInstance Win32_Processor | Where-Object Architecture -eq 12)){ throw 'This package is for Windows ARM64 only.' }; if(-not (Get-PnpDevice -PresentOnly | Where-Object InstanceId -like 'PCI\VEN_1AF4&DEV_1050*')){ throw 'VirtIO-GPU is not present. Enable it in WindowsiOS-ez before installing.' }; Write-Host 'This is an experimental 3D driver. Back up your VM before continuing.'; if((Read-Host 'Type INSTALL to continue') -cne 'INSTALL'){ throw 'Installation cancelled.' }; $dir=Join-Path $env:TEMP ('WindowsiOS-MetalGPU-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $dir | Out-Null; $name='viogpu3d-arm64x-signed.zip'; $zip=Join-Path $dir $name; $local=Join-Path $env:METALGPU_INSTALLER_DIR $name; if(Test-Path -LiteralPath $local -PathType Leaf){ Copy-Item -LiteralPath $local -Destination $zip } else { Write-Host 'Downloading the official UTM signed driver...'; Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/utmapp/viogpu-wddm/releases/download/v0.6/viogpu3d-arm64x-signed.zip' -OutFile $zip }; if((Get-Item -LiteralPath $zip).Length -ne 2784710 -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne '723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f'){ throw 'Driver checksum mismatch. Nothing was installed.' }; $extracted=Join-Path $dir 'driver'; Expand-Archive -LiteralPath $zip -DestinationPath $extracted; $inf=@(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter 'viogpu3d.inf'); if($inf.Count -ne 1){ throw 'Expected exactly one viogpu3d.inf.' }; Write-Host 'Installing the signed ARM64X driver using Windows PnPUtil...'; & pnputil.exe /add-driver $inf[0].FullName /install; $rc=$LASTEXITCODE; if($rc -notin 0,3010){ throw ('PnPUtil failed: '+$rc) }; Write-Host 'Driver staging/installation completed. Restart Windows, then check Device Manager and dxdiag. This does not prove hardware acceleration.'; exit 0 } catch { Write-Host ('ERROR: '+$_.Exception.Message) -ForegroundColor Red; exit 1 } finally { if($dir -and (Test-Path -LiteralPath $dir)){ Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue } }"
-set "rc=%errorlevel%"
+title MetalGPU Driver Installer - v0.6 R2
+echo WindowsiOS-ez MetalGPU Driver Installer
 echo.
+echo Back up the VM first. Run as administrator with VirtIO-GPU enabled.
+choice /C YN /N /M "Continue with the experimental signed driver? [Y/N] "
+if errorlevel 2 goto cancel
+if not errorlevel 1 goto cancel
+set "WORK=%TEMP%\MetalGPU-%RANDOM%-%RANDOM%"
+mkdir "%WORK%" || goto fail
+set "ZIP=%WORK%\driver.zip"
+echo [1/4] Obtaining official UTM ARM64X driver...
+if exist "%~dp0viogpu3d-arm64x-signed.zip" (
+  copy /y "%~dp0viogpu3d-arm64x-signed.zip" "%ZIP%" || goto fail
+) else (
+  curl.exe --fail --location --show-error --connect-timeout 15 --max-time 180 --output "%ZIP%" "https://github.com/utmapp/viogpu-wddm/releases/download/v0.6/viogpu3d-arm64x-signed.zip" || goto fail
+)
+echo [2/4] Checking SHA-256...
+certutil.exe -hashfile "%ZIP%" SHA256 > "%WORK%\hash.txt"
+if errorlevel 1 goto fail
+findstr.exe /I /X /C:"723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f" "%WORK%\hash.txt" >nul
+if errorlevel 1 (
+  echo ERROR: Driver checksum did not match.
+  goto fail
+)
+echo [3/4] Extracting signed driver...
+mkdir "%WORK%\driver" || goto fail
+tar.exe -xf "%ZIP%" -C "%WORK%\driver" || goto fail
+set "INF="
+for /r "%WORK%\driver" %%F in (viogpu3d.inf) do if exist "%%F" set "INF=%%F"
+if not defined INF goto fail
+echo [4/4] Installing with Windows PnPUtil...
+echo "%INF%"
+pnputil.exe /add-driver "%INF%" /install
+set "RC=%ERRORLEVEL%"
+if "%RC%"=="3010" goto success
+if not "%RC%"=="0" goto fail
+:success
+echo.
+echo Driver staging completed. Restart Windows and check Device Manager.
+echo Installation does not prove hardware acceleration.
 pause
-exit /b %rc%
+rmdir /s /q "%WORK%"
+exit /b 0
+:fail
+echo.
+echo Installation failed. Review the output above.
+echo If PnPUtil reports access denied, run as administrator.
+echo Temporary files, if any, are at "%WORK%".
+pause
+exit /b 1
+:cancel
+echo Cancelled.
+pause
+exit /b 0
