@@ -139,3 +139,6 @@ The temporary build branch downloads official UTM artifact 14412813611 from run 
 
 ### Experimental SMP lab
 MetalGPU permits 1–8 vCPUs in the installed-VM opt-in. GPU command processing and deferred reset stay on CPU0. Aperture accesses hold the device lock; mapping changes and CPU aperture writes advance an exclusive epoch. Test 1, 2, 4 and 8 vCPUs on backed-up VMs, including reset, D3D11 rendering, concurrent aperture access and RAMFB recovery. Existing 2D regressions are not SMP/Metal validation. Physical-device results remain unverified.
+
+### 10 GiB experimental budget
+Experimental preset: guest 7680 MiB, JIT 1536 MiB, Neptune tracked resource/backing budget 1024 MiB (on demand); selecting preset sets eight vCPUs, adjustable 1–8. Both memory entitlements stay enabled in the manifest and XcodeGen. Additional memory can be consumed by JIT metadata, GPU driver/renderer and the OS; 10 GiB is not a process footprint cap. Explicit MetalGPU RAM launch checks include actual mapped JIT, GPU budget and 768 MiB physical headroom. Test on the iPad with runtime entitlement diagnostics, physical footprint and memory warnings; no device performance or stability result is claimed.

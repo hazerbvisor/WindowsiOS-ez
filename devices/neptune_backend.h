@@ -19,7 +19,8 @@ enum {
     HV_NPT_MAX_FENCES = 256
 };
 #define HV_NPT_APERTURE_BYTES (UINT64_C(8) << 30)
-#define HV_NPT_BLOB_BUDGET (UINT64_C(256) << 20)
+/* Experimental MetalGPU resource + bounce backing budget, not dedicated VRAM. */
+#define HV_NPT_BLOB_BUDGET (UINT64_C(1024) << 20)
 typedef struct HvNeptuneFence {
     uint32_t context, ring;
     uint64_t guest_id, ticket;

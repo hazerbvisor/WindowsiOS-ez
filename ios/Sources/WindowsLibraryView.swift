@@ -698,6 +698,20 @@ struct HardwareFields: View {
             Picker("Preset", selection: $hardware.preset) {
                 ForEach(HardwarePreset.allCases) { Text($0.title).tag($0) }
             }
+            .onChange(of: hardware.preset) { _, preset in
+                if preset == .experimental {
+                    hardware.vCPUs = 8
+                    hardware.jitOverrideMiB = nil
+                    customJIT = false
+                }
+            }
+            if hardware.preset == .experimental {
+                LabeledContent("MetalGPU resource limit", value: "1,024 MiB")
+                LabeledContent("Configured budget (GPU on)", value: "\(hardware.ramMiB + hardware.jitMiB + 1024) MiB")
+                Text("Experimental budget excludes additional emulator and renderer overhead. GPU resources are allocated on demand, not reserved VRAM.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if hardware.preset == .custom {
                 Stepper("Guest RAM · \(hardware.ramMiB) MiB", onIncrement: { adjustRAM(by: 256) },
                         onDecrement: { adjustRAM(by: -256) })

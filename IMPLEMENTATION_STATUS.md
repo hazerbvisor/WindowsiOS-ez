@@ -65,3 +65,5 @@ The manual unsigned IPA build accepts WINIOS_NEPTUNE_LAB=1 and stages the pinned
 Added saved per-VM guest-resolution presets for 11/13-inch iPads and common PC resolutions, advertised as the VirtIO-GPU custom mode via GET_DISPLAY_INFO with stable standard EDID timings. Host scaling and RAMFB remain independent. Guest mode acceptance and device display tests are pending.
 
 Experimental SMP lab candidate: removed 1-vCPU gate, protected GPU aperture lifetime and routed GPU queues/resets to CPU0. Device validation outstanding. No USB changes.
+
+Experimental 10 GiB configured budget: 7.5 GiB guest RAM, 1.5 GiB JIT, 1 GiB Neptune tracked allocation limit, selectable 1–8 vCPUs. Both existing memory entitlements preserved. Physical iPad validation pending.

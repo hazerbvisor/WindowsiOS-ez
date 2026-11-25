@@ -1,4 +1,4 @@
-name: Experimental MetalGPU SMP IPA
+name: Experimental MetalGPU SMP 10GiB IPA
 on:
   push:
     branches: [build/metalgpu-smp]
@@ -40,7 +40,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-SMP-unsigned
+          name: WindowsiOS-ez-MetalGPU-SMP-10GiB-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

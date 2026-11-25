@@ -456,6 +456,18 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         uint64_t availableMiB = [self availableMemoryMB];
         BOOL fitsPreallocation = preallocRam && ramMiB <= (preallocBytes >> 20);
         BOOL fitsProcessBudget = winios_guest_ram_fits(ramMiB, availableMiB);
+        // Preserve physical headroom for the actual JIT mapping and the
+        // on-demand graphics budget, even if guest RAM is ledger-exempt.
+        if (experimentalGraphics && !installer) {
+            const uint64_t gpuBudgetMiB = 1024;
+            const uint64_t mappedJITMiB = jit.size >> 20;
+            const uint64_t overheadMiB = 768;
+            if (physicalMiB <= mappedJITMiB + gpuBudgetMiB + overheadMiB ||
+                ramMiB > physicalMiB - mappedJITMiB - gpuBudgetMiB - overheadMiB) {
+                [self reportStartFailure:@"MetalGPU memory budget exceeds physical RAM with JIT, GPU resources and launch headroom included. Choose a smaller guest RAM or JIT cache."];
+                return;
+            }
+        }
         if (!winios_guest_ram_fits(ramMiB, physicalMiB) || (!fitsPreallocation && !fitsProcessBudget)) {
             [self reportStartFailure:[NSString stringWithFormat:
                 @"Cannot start with %llu MiB guest RAM. Physical: %llu MiB; process headroom: %llu MiB; ledger reservation: %llu MiB. %s",

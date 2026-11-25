@@ -13,7 +13,7 @@ enum HardwarePreset: String, CaseIterable, Codable, Identifiable {
         case .compatibility: (4608, 384)
         case .balanced: (6144, 512)
         case .performance: (8192, 1024)
-        case .experimental: (10240, 1536)
+        case .experimental: (7680, 1536)
         }
     }
 }
