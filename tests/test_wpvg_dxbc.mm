@@ -5,7 +5,7 @@
 #include <cstdlib>
 id<MTLFunction> wpvgCompileTrustedSM5(id<MTLDevice>,NSData *,MTLFunctionType,NSError **);
 static void require(bool condition,const char *message) {
-    if(!condition) { fprintf(stderr,"WinPVG DXBC FAIL: %s\n",message); exit(1); }
+    if(!condition) @throw [NSException exceptionWithName:@"WinPVGTestFailure" reason:[NSString stringWithUTF8String:message] userInfo:nil];
 }
 static id<MTLFunction> shader(id<MTLDevice> d,const char *path,MTLFunctionType stage) {
     NSData *input=[NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
@@ -56,9 +56,11 @@ static void render(id<MTLDevice> d,id<MTLCommandQueue> queue,
     require(center[0]==red && center[1]==green && center[2]==0 && center[3]==255,"center color");
     require(p[0]==0 && p[1]==0 && p[2]==255 && p[3]==255,"background color");
 }
-int main(int argc,const char **argv) {
-    @autoreleasepool {
-        require(argc==4,"usage: test_wpvg_dxbc vertex.cso red.cso green.cso");
+NSString *wpvgRunDXBCTest(NSString *vertex, NSString *redPath, NSString *greenPath, BOOL *passed) {
+    if(passed) *passed=NO;
+    @autoreleasepool { @try {
+        require(vertex != nil && redPath != nil && greenPath != nil,"missing trusted bundled shader fixtures");
+        const char *argv[]={nullptr,vertex.fileSystemRepresentation,redPath.fileSystemRepresentation,greenPath.fileSystemRepresentation};
         id<MTLDevice> d=MTLCreateSystemDefaultDevice();
         require(d!=nil,"Metal unavailable");
         id<MTLCommandQueue> q=[d newCommandQueue]; require(q!=nil,"queue");
@@ -71,6 +73,20 @@ int main(int argc,const char **argv) {
         id<MTLFunction> green=shader(d,argv[3],MTLFunctionTypeFragment);
         render(d,q,vs,red,255,0);
         render(d,q,vs,green,0,255);
-        printf("WinPVG DXBC-to-Metal PASS on %s: red and green translated shaders\n",d.name.UTF8String);
+        if(passed) *passed=YES;
+        return [NSString stringWithFormat:@"WinPVG DXBC-to-Metal PASS on %@: red and green translated shaders",d.name];
+    } @catch(NSException *e) {
+        return [NSString stringWithFormat:@"WinPVG DXBC FAIL: %@",e.reason ?: e.name];
+    } }
+}
+#ifndef WPVG_IOS_APP
+int main(int argc,const char **argv) {
+    @autoreleasepool {
+        if(argc!=4) { fprintf(stderr,"usage: test_wpvg_dxbc vertex.cso red.cso green.cso\n"); return 2; }
+        BOOL pass=NO;
+        NSString *result=wpvgRunDXBCTest([NSString stringWithUTF8String:argv[1]], [NSString stringWithUTF8String:argv[2]], [NSString stringWithUTF8String:argv[3]], &pass);
+        fprintf(pass?stdout:stderr,"%s\n",result.UTF8String);
+        return pass?0:1;
     }
 }
+#endif
