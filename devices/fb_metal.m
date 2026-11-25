@@ -48,6 +48,7 @@ static NSString *const kFbShaderSource =
     _Atomic(uint64_t) framesPresented;
     uint64_t lastHash;
     uint64_t lastScanoutSerial;
+    BOOL lastNative;
     CGSize lastDrawableSize;
 }
 - (instancetype)initWithDisplay:(HvFbDisplay *)display;
@@ -153,40 +154,57 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         }
 
         uint64_t scanoutSerial = 0;
-        if (hv_fb_display_acquire_frame(fb, &px, &w, &h, &stride, &scanoutSerial) != 0) {
-            os_unfair_lock_unlock(&lock);
-            return;
+        /* ARC retains the Metal object while the display lock protects the
+         * renderer's published handle. The command buffer retains its texture
+         * through GPU execution even when the guest switches scanouts. */
+        id<MTLTexture> native = nil;
+        pthread_mutex_lock(&fb->mu);
+        if (fb->native_texture) {
+            native=(__bridge id<MTLTexture>)fb->native_texture;
+            w=fb->native_width; h=fb->native_height;
+            scanoutSerial=fb->scanout_serial;
         }
-
-        uint64_t hval = scanoutSerial ? 0 : quick_frame_hash(px, w, h, stride);
+        pthread_mutex_unlock(&fb->mu);
+        BOOL usingNative=native!=nil;
         BOOL sizeChanged = !CGSizeEqualToSize(dsize, lastDrawableSize);
-        if (texture && scanoutSerial == lastScanoutSerial && hval == lastHash && !sizeChanged && texW == w && texH == h) {
-            hv_fb_display_release_frame(fb);
-            os_unfair_lock_unlock(&lock);
-            return;
-        }
-
-        if (!texture || texW != w || texH != h) {
-            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                          width:w
-                                                                                         height:h
-                                                                                      mipmapped:NO];
-            td.usage = MTLTextureUsageShaderRead;
-            texture = [device newTextureWithDescriptor:td];
-            if (!texture) {
-                hv_fb_display_release_frame(fb);
-                os_unfair_lock_unlock(&lock);
-                return;
+        uint64_t hval=0;
+        id<MTLTexture> sampleTexture=nil;
+        if (usingNative) {
+            if (native.device!=device || native.width!=w || native.height!=h ||
+                native.textureType!=MTLTextureType2D || native.sampleCount!=1 ||
+                (native.pixelFormat!=MTLPixelFormatBGRA8Unorm && native.pixelFormat!=MTLPixelFormatRGBA8Unorm &&
+                 native.pixelFormat!=MTLPixelFormatBGRA8Unorm_sRGB && native.pixelFormat!=MTLPixelFormatRGBA8Unorm_sRGB)) {
+                os_unfair_lock_unlock(&lock); return;
             }
-            texW = w;
-            texH = h;
+            if (lastNative && scanoutSerial==lastScanoutSerial && !sizeChanged) {
+                os_unfair_lock_unlock(&lock); return;
+            }
+            sampleTexture=native;
+        } else {
+            if (hv_fb_display_acquire_frame(fb,&px,&w,&h,&stride,&scanoutSerial)!=0) {
+                os_unfair_lock_unlock(&lock); return;
+            }
+            hval=scanoutSerial?0:quick_frame_hash(px,w,h,stride);
+            if (!lastNative && texture && scanoutSerial==lastScanoutSerial && hval==lastHash &&
+                !sizeChanged && texW==w && texH==h) {
+                hv_fb_display_release_frame(fb);
+                os_unfair_lock_unlock(&lock); return;
+            }
+            if (!texture || texW!=w || texH!=h) {
+                MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                    width:w height:h mipmapped:NO];
+                td.usage=MTLTextureUsageShaderRead;
+                texture=[device newTextureWithDescriptor:td];
+                if (!texture) {
+                    hv_fb_display_release_frame(fb);
+                    os_unfair_lock_unlock(&lock); return;
+                }
+                texW=w; texH=h;
+            }
+            [texture replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:px bytesPerRow:stride];
+            hv_fb_display_release_frame(fb);
+            sampleTexture=texture;
         }
-
-        [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
-                   mipmapLevel:0
-                     withBytes:px
-                   bytesPerRow:stride];
-        hv_fb_display_release_frame(fb);
 
         id<CAMetalDrawable> drawable = [curLayer nextDrawable];
         if (!drawable) {
@@ -213,12 +231,13 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:pipeline];
         [enc setVertexBytes:scale length:sizeof(scale) atIndex:0];
-        [enc setFragmentTexture:texture atIndex:0];
+        [enc setFragmentTexture:sampleTexture atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         [enc endEncoding];
         [cb presentDrawable:drawable];
         [cb commit];
 
+        lastNative = usingNative;
         lastHash = hval;
         lastScanoutSerial = scanoutSerial;
         lastDrawableSize = dsize;

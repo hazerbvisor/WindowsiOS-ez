@@ -146,13 +146,7 @@ void hv_winvm_set_presentation_rate(unsigned fps) {
 int hv_winvm_display_size(uint32_t *w, uint32_t *h) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     if (!fb) return -1;
-    const uint8_t *px = NULL;
-    uint32_t fw = 0, fh = 0, st = 0;
-    if (hv_fb_display_acquire_frame(fb, &px, &fw, &fh, &st, NULL) != 0) return -1;
-    hv_fb_display_release_frame(fb);
-    if (w) *w = fw;
-    if (h) *h = fh;
-    return 0;
+    return hv_fb_display_get_size(fb,w,h);
 }
 
 uint64_t hv_winvm_display_frames(void) {

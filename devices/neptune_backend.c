@@ -2,6 +2,7 @@
 #include "neptune_backend.h"
 
 #if defined(WINIOS_ENABLE_NEPTUNE)
+#define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include <virglrenderer.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -28,7 +29,8 @@ typedef struct Pending {
  X(virgl_renderer_context_poll) X(virgl_renderer_resource_create_blob) \
  X(virgl_renderer_resource_map) X(virgl_renderer_resource_unmap) \
  X(virgl_renderer_resource_get_map_info) X(virgl_renderer_resource_unref) \
- X(virgl_renderer_ctx_attach_resource) X(virgl_renderer_ctx_detach_resource)
+ X(virgl_renderer_ctx_attach_resource) X(virgl_renderer_ctx_detach_resource) \
+ X(virgl_renderer_create_handle_for_scanout) X(virgl_renderer_release_handle_for_scanout)
 struct HvNeptune {
     void *renderer, *dxmt;
 #define FIELD(sym) __typeof__(&sym) sym;
@@ -232,6 +234,23 @@ int hv_neptune_blob_destroy(HvNeptune *n,uint32_t resource) {
     n->virgl_renderer_resource_unref(resource);
     n->allocated-=b->bytes; *b=(Blob){0};
     return 0;
+}
+
+void *hv_neptune_scanout_texture(HvNeptune *n,uint32_t resource,uint32_t width,uint32_t height,uint32_t format,uint32_t stride,uint32_t offset) {
+    Blob *b=n?blob(n,resource):NULL;
+    if (!b || !width || !height || width>4096 || height>4096 || stride<width*4 ||
+        (format!=1 && format!=2 && format!=67 && format!=134) ||
+        offset>=b->bytes || (uint64_t)stride*(height-1)+(uint64_t)width*4>b->bytes-offset) return NULL;
+    virgl_renderer_native_handle handle=NULL;
+    enum virgl_renderer_native_handle_type type=n->virgl_renderer_create_handle_for_scanout(resource,width,height,format,0,stride,offset,&handle);
+    if (type!=VIRGL_NATIVE_HANDLE_METAL_TEXTURE) {
+        if (type!=VIRGL_NATIVE_HANDLE_NONE && handle) n->virgl_renderer_release_handle_for_scanout(type,handle);
+        return NULL;
+    }
+    return handle;
+}
+void hv_neptune_scanout_release(HvNeptune *n,void *texture) {
+    if (n && texture) n->virgl_renderer_release_handle_for_scanout(VIRGL_NATIVE_HANDLE_METAL_TEXTURE,texture);
 }
 
 bool hv_neptune_blob_exists(HvNeptune *n,uint32_t resource) { return n && blob(n,resource)!=NULL; }

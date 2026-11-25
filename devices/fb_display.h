@@ -27,6 +27,9 @@ typedef struct HvFbDisplay {
     uint8_t *scanout;
     uint32_t scanout_width, scanout_height;
     uint64_t scanout_serial;
+    /* Borrowed native texture; owner retains until replaced under mu. */
+    void *native_texture;
+    uint32_t native_width, native_height;
 
     /* Metal presenter handle (created lazily by fb_metal.m) */
     void *metal;
@@ -37,6 +40,10 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg);
 int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h,
                                 uint32_t *stride, uint64_t *scanout_serial);
 void hv_fb_display_release_frame(HvFbDisplay *fb);
+int hv_fb_display_get_size(HvFbDisplay *fb,uint32_t *w,uint32_t *h);
+/* Texture is retained by the renderer owner, not by this C display object. */
+void hv_fb_display_set_native(HvFbDisplay *fb,void *texture,uint32_t w,uint32_t h);
+void hv_fb_display_native_dirty(HvFbDisplay *fb);
 /* Takes ownership of a tightly packed BGRA scanout, or falls back to RAMFB with NULL. */
 void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uint32_t h);
 

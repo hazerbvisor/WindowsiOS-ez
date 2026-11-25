@@ -77,6 +77,8 @@ struct HvVirtioGpu {
     uint64_t completed[QUEUES], malformed, command_errors, publishes, resets;
 #ifdef WINIOS_ENABLE_NEPTUNE
     HvNeptune *neptune;
+    void *native_texture;
+    uint32_t native_resource, native_width, native_height;
     NeptuneReply deferred[HV_NPT_MAX_FENCES];
     uint64_t neptune_submits, neptune_completed;
 #endif
@@ -131,6 +133,11 @@ static void detach(HvVirtioGpu *gpu, Resource *res) {
 
 static void clear_scanout(HvVirtioGpu *gpu) {
     hv_fb_display_set_scanout(gpu->fb, NULL, 0, 0);
+#ifdef WINIOS_ENABLE_NEPTUNE
+    if (gpu->native_texture) hv_neptune_scanout_release(gpu->neptune,gpu->native_texture);
+    gpu->native_texture=NULL;
+    gpu->native_resource=gpu->native_width=gpu->native_height=0;
+#endif
     free(gpu->screen.front);
     gpu->screen = (Scanout){0};
 }
@@ -449,17 +456,67 @@ static void *neptune_cpu_ptr(void *opaque,uint64_t pa,uint64_t bytes) {
     return hv_neptune_aperture_ptr(gpu->neptune,pa-base,bytes);
 }
 
+static uint32_t neptune_scanout_command(HvVirtioGpu *gpu,const HvVirtqElem *elem,const Header *hdr) {
+    Header response=*hdr;
+    response.type=ERR_PARAMETER;
+    uint32_t body[18]={0};
+    uint64_t got=segment_capacity(elem,0);
+    if (hdr->flags || hdr->context) goto out;
+    if (hdr->type==0x10d) {
+        /* SET_SCANOUT_BLOB: rect, scanout, resource, width/height, format,
+         * padding, four strides and four offsets. Initially full-frame only. */
+        if (got!=sizeof(Header)+sizeof(body) ||
+            hv_virtq_read(&gpu->vio,elem,sizeof(Header),body,sizeof(body))!=sizeof(body)) goto out;
+        if (body[4]) { response.type=ERR_SCANOUT; goto out; }
+        if (!body[5]) { clear_scanout(gpu); response.type=OK_NODATA; goto out; }
+        if (body[0] || body[1] || body[2]!=body[6] || body[3]!=body[7] ||
+            body[11] || body[12] || body[13] || body[15] || body[16] || body[17]) goto out;
+        void *tex=hv_neptune_scanout_texture(gpu->neptune,body[5],body[6],body[7],body[8],body[10],body[14]);
+        if (!tex) { response.type=ERR_UNSPEC; goto out; }
+        clear_scanout(gpu);
+        gpu->native_texture=tex;
+        gpu->native_resource=body[5];
+        gpu->native_width=body[6]; gpu->native_height=body[7];
+        hv_fb_display_set_native(gpu->fb,tex,body[6],body[7]);
+        response.type=OK_NODATA;
+    } else if (hdr->type==RESOURCE_FLUSH) {
+        if (got!=sizeof(Header)+24 ||
+            hv_virtq_read(&gpu->vio,elem,sizeof(Header),body,24)!=24) goto out;
+        if (body[4]!=gpu->native_resource || !gpu->native_texture) { response.type=ERR_RESOURCE; goto out; }
+        if (!body[2] || !body[3] || body[0]>=gpu->native_width || body[1]>=gpu->native_height ||
+            body[2]>gpu->native_width-body[0] || body[3]>gpu->native_height-body[1]) goto out;
+        hv_fb_display_native_dirty(gpu->fb);
+        gpu->publishes++;
+        response.type=OK_NODATA;
+    }
+out:
+    if (response.type>=ERR_UNSPEC) gpu->command_errors++;
+    return hv_virtq_write(&gpu->vio,elem,0,&response,sizeof(response));
+}
+
 static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *written,bool *deferred) {
     Header hdr={0};
     HvVirtio *v=&gpu->vio;
     if (!gpu->neptune || (v->driver_features & 0x19)!=0x19 ||
         hv_virtq_read(v,elem,0,&hdr,sizeof(hdr))!=sizeof(hdr)) return false;
+    if (hdr.type==0x10d) {
+        *written=neptune_scanout_command(gpu,elem,&hdr);
+        return true;
+    }
+    if (hdr.type==RESOURCE_FLUSH && gpu->native_resource) {
+        uint32_t id=0;
+        if (hv_virtq_read(v,elem,sizeof(hdr)+16,&id,4)==4 && id==gpu->native_resource) {
+            *written=neptune_scanout_command(gpu,elem,&hdr);
+            return true;
+        }
+    }
     bool route=(hdr.type>=0x200 && hdr.type<=0x209) || hdr.type==GET_CAPSET_INFO ||
         hdr.type==GET_CAPSET || hdr.type==0x10c;
     if (hdr.type==RESOURCE_UNREF) {
         uint32_t id=0;
         if (hv_virtq_read(v,elem,sizeof(hdr),&id,4)==4)
             route=hv_neptune_blob_exists(gpu->neptune,id);
+        if (route && id==gpu->native_resource) clear_scanout(gpu);
     }
     if (!route) return false;
     uint64_t length=segment_capacity(elem,0), capacity=segment_capacity(elem,1);
@@ -485,8 +542,12 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
                 if (id && lookup(gpu,id)) {
                     Header error=hdr; error.type=ERR_RESOURCE;
                     memcpy(reply,&error,sizeof(error)); n=sizeof(error);
-                } else n=hv_neptune_wire_command(gpu->neptune,request,(size_t)length,reply,
+                } else {
+                    /* Invalidate any exclusive reservation before map/unmap or resource replacement. */
+                    if (v->m->cpu && (hdr.type==0x208 || hdr.type==0x209 || hdr.type==RESOURCE_UNREF)) v->m->cpu->excl_addr=~0ull;
+                    n=hv_neptune_wire_command(gpu->neptune,request,(size_t)length,reply,
                     capacity<sizeof(reply)?(size_t)capacity:sizeof(reply),&ticket);
+                }
             }
             free(request);
         }
@@ -556,7 +617,7 @@ void hv_virtio_gpu_start_neptune(HvVirtioGpu *gpu,int ncpus) {
     v->config[12]=1; /* Neptune only; explicitly NOT a v0.6-compatible device yet. */
     v->m->cpu_aperture_opaque=gpu;
     v->m->cpu_aperture_ptr=neptune_cpu_ptr;
-    fprintf(stderr,"winvm: single-vCPU Neptune LAB transport enabled (no shadow VirGL/scanout)\n");
+    fprintf(stderr,"winvm: single-vCPU Neptune LAB transport enabled (native scanout candidate; no shadow VirGL)\n");
 #else
     (void)gpu; (void)ncpus;
 #endif

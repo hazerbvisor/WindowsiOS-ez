@@ -78,6 +78,7 @@ int hv_fb_display_acquire_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_
                                 uint32_t *stride, uint64_t *scanout_serial) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);
+    if (fb->native_texture) { pthread_mutex_unlock(&fb->mu); return -1; }
     if (fb->scanout) {
         *pixels = fb->scanout;
         *w = fb->scanout_width;
@@ -105,10 +106,43 @@ void hv_fb_display_release_frame(HvFbDisplay *fb) {
 void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uint32_t h) {
     pthread_mutex_lock(&fb->mu);
     uint8_t *old = fb->scanout;
+    fb->native_texture = NULL;
+    fb->native_width = fb->native_height = 0;
     fb->scanout = pixels;
     fb->scanout_width = w;
     fb->scanout_height = h;
     if (++fb->scanout_serial == 0) fb->scanout_serial++;
     pthread_mutex_unlock(&fb->mu);
     free(old);
+}
+
+int hv_fb_display_get_size(HvFbDisplay *fb,uint32_t *w,uint32_t *h) {
+    if (!fb) return -1;
+    pthread_mutex_lock(&fb->mu);
+    uint32_t width=0,height=0;
+    if (fb->native_texture) { width=fb->native_width; height=fb->native_height; }
+    else if (fb->scanout) { width=fb->scanout_width; height=fb->scanout_height; }
+    else if (fb->active && fb->fb_host) { width=fb->width; height=fb->height; }
+    pthread_mutex_unlock(&fb->mu);
+    if (!width || !height) return -1;
+    if (w) *w=width;
+    if (h) *h=height;
+    return 0;
+}
+void hv_fb_display_set_native(HvFbDisplay *fb,void *texture,uint32_t w,uint32_t h) {
+    pthread_mutex_lock(&fb->mu);
+    uint8_t *old=fb->scanout;
+    fb->scanout=NULL;
+    fb->scanout_width=fb->scanout_height=0;
+    fb->native_texture=texture;
+    fb->native_width=texture?w:0;
+    fb->native_height=texture?h:0;
+    if (++fb->scanout_serial==0) fb->scanout_serial++;
+    pthread_mutex_unlock(&fb->mu);
+    free(old);
+}
+void hv_fb_display_native_dirty(HvFbDisplay *fb) {
+    pthread_mutex_lock(&fb->mu);
+    if (fb->native_texture && ++fb->scanout_serial==0) fb->scanout_serial++;
+    pthread_mutex_unlock(&fb->mu);
 }
