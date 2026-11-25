@@ -1,0 +1,89 @@
+name: Publish direct MetalGPU INF package
+on:
+  push:
+    branches: [build/metalgpu-driver-release]
+    paths: [.github/workflows/publish-metalgpu-inf.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download and verify original signed driver
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          curl --fail --location --retry 3 -o original.zip https://github.com/utmapp/viogpu-wddm/releases/download/v0.6/viogpu3d-arm64x-signed.zip
+          echo '723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f  original.zip' | sha256sum -c -
+          python3 - <<'PY'
+          import pathlib, re, zipfile
+          with zipfile.ZipFile("original.zip") as z:
+              assert z.testzip() is None
+              names=z.namelist()
+              assert all(not n.startswith(("/", "\\")) and ".." not in pathlib.PurePosixPath(n).parts and "\\" not in n for n in names)
+              inf=[n for n in names if n.rsplit("/",1)[-1].lower()=="viogpu3d.inf"]
+              assert len(inf)==1, inf
+              raw=z.read(inf[0])
+              s=raw.decode("utf-16") if raw.startswith((b"\xff\xfe",b"\xfe\xff")) else raw.decode("utf-8-sig",errors="replace")
+              for component in ("viogpu3d.sys","viogpu3d.cat","neptune_umd.dll","vulkan_virtio.dll"):
+                  assert any(n.rsplit("/",1)[-1].lower()==component for n in names), component
+              rev=re.search(r"(?im)^;\s*mesa\s+([0-9a-f]{7,40})\s*$",s)
+              assert rev, "Missing Mesa source revision"
+              pathlib.Path("mesa-rev").write_text(rev.group(1))
+              z.extractall("package")
+          PY
+      - name: Include corresponding upstream license notices
+        run: |
+          set -euo pipefail
+          mkdir -p package/Upstream-Notices
+          kmd=d25bb08c4a9cfb034f4db9ea9e2982a8be02e86b
+          mesa="$(gh api "repos/utmapp/mesa/commits/$(cat mesa-rev)" --jq .sha)"
+          for p in LICENSE VirtIO/LICENSE viogpuap/LICENSE viogpudo/LICENSE viogpusc/LICENSE; do
+            curl --fail --location --retry 3 "https://raw.githubusercontent.com/utmapp/viogpu-wddm/$kmd/$p" -o "package/Upstream-Notices/wddm-${p//\//-}.txt"
+          done
+          gh api "repos/utmapp/mesa/git/trees/$mesa?recursive=1" > mesa-tree.json
+          python3 - <<'PY' > license-paths.txt
+          import json,re
+          t=json.load(open("mesa-tree.json"))
+          assert not t.get("truncated")
+          for f in t["tree"]:
+              if f["type"]=="blob" and re.search(r"(^|/)(license(\.[^/]+)?|copying(\.[^/]+)?|copyright(\.[^/]+)?|notice(\.[^/]+)?)$",f["path"],re.I):
+                  print(f["path"])
+          PY
+          while IFS= read -r p; do
+            curl --fail --location --retry 3 "https://raw.githubusercontent.com/utmapp/mesa/$mesa/$p" -o "package/Upstream-Notices/mesa-${p//\//-}"
+          done < license-paths.txt
+          cat > package/README.txt <<EOF
+          WindowsiOS-ez experimental MetalGPU driver, Windows ARM64
+          This is the unmodified signed UTM v0.6 driver payload, repackaged with notices.
+          Back up your VM. Enable VirtIO-GPU and confirm the Neptune lab backend initialized.
+          In Device Manager, update the matching VirtIO GPU device using the extracted folder,
+          or right-click viogpu3d.inf and select Install. Restart and verify device status.
+          No signing policy or Secure Boot changes are needed for the signed release.
+          Actual hardware acceleration remains unverified on WindowsiOS-ez.
+          Original release: https://github.com/utmapp/viogpu-wddm/releases/tag/v0.6
+          Original archive SHA256: 723131a1d0a8b7f01037b7efe3b6ac7b90f034734460885fba0edd7d8c75425f
+          Kernel driver sources: https://github.com/utmapp/viogpu-wddm/tree/$kmd
+          Mesa sources: https://github.com/utmapp/mesa/tree/$mesa
+          License notices are in Upstream-Notices.
+          EOF
+      - name: Package and verify every signed payload file unchanged
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, pathlib, zipfile
+          out="WindowsiOS-ez-MetalGPU-INF-ARM64.zip"
+          with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(pathlib.Path("package").rglob("*")):
+                  if p.is_file():
+                      z.write(p,p.relative_to("package").as_posix())
+          with zipfile.ZipFile("original.zip") as a, zipfile.ZipFile(out) as b:
+              assert b.testzip() is None
+              for n in a.namelist():
+                  if not n.endswith("/"): assert a.read(n)==b.read(n),n
+          pathlib.Path("INF-SHA256SUMS").write_text(hashlib.sha256(pathlib.Path(out).read_bytes()).hexdigest()+"  "+out+"\n")
+          PY
+          gh release upload metalgpu-driver-v0.6-r2 WindowsiOS-ez-MetalGPU-INF-ARM64.zip INF-SHA256SUMS --repo "$GITHUB_REPOSITORY"
