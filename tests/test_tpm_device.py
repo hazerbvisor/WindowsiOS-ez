@@ -92,10 +92,10 @@ int main(int argc, char **argv) {
 
 
 class TPMPlatformDescriptionTests(unittest.TestCase):
-    def test_acpi_and_dtb_only_expose_tpm_when_configured(self):
+    def test_acpi_and_dtb_describe_cpu_count_and_optional_tpm(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "TargetConditionals.h").write_text("#define TARGET_OS_IPHONE 0\n")
+            (root / "TargetConditionals.h").write_text("#define TARGET_OS_IPHONE 1\n")
             runner = root / "tables.c"
             runner.write_text(r"""
 #include <assert.h>
@@ -106,6 +106,8 @@ class TPMPlatformDescriptionTests(unittest.TestCase):
 
 static int with_tpm;
 static int saw_acpi;
+static unsigned cpu_count;
+static unsigned saw_madt;
 
 static uint32_t le32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -133,6 +135,22 @@ int hv_fw_cfg_add_file(HvFwCfg *fw, const char *name, const void *opaque, uint32
                 assert(le32(data + offset + 48) == 6);
                 saw_acpi++;
             }
+            if (memcmp(data + offset, "APIC", 4) == 0) {
+                unsigned processors = 0;
+                for (size_t entry = offset + 44; entry + 2 <= offset + len;) {
+                    unsigned entry_length = data[entry + 1];
+                    assert(entry_length >= 2 && entry_length <= offset + len - entry);
+                    if (data[entry] == 0x0b) {
+                        assert(entry_length == 80);
+                        assert(le32(data + entry + 8) == processors);
+                        assert(le32(data + entry + 68) == processors);
+                        processors++;
+                    }
+                    entry += entry_length;
+                }
+                assert(processors == cpu_count);
+                saw_madt++;
+            }
             offset += len;
         }
     }
@@ -140,17 +158,23 @@ int hv_fw_cfg_add_file(HvFwCfg *fw, const char *name, const void *opaque, uint32
 }
 
 int main(void) {
-    for (with_tpm = 0; with_tpm < 2; with_tpm++) {
-        uint32_t pa = with_tpm ? 0x0c000000 : 0;
-        saw_acpi = 0;
-        hv_acpi_build_and_register(NULL, 4, 6ULL << 30, 0, 0, pa);
-        assert(saw_acpi == with_tpm);
-        size_t size = 0;
-        uint8_t *tree = hv_fdt_build_virt(4, 0x40000000, 6ULL << 30, pa, &size);
-        assert(tree);
-        assert(contains(tree, size, "tcg,tpm-tis-mmio") == with_tpm);
-        assert(contains(tree, size, "tpm@c000000") == with_tpm);
-        free(tree);
+    _Static_assert(HV_MAX_CPUS == 8, "iOS vCPU limit");
+    for (cpu_count = 4; cpu_count <= HV_MAX_CPUS; cpu_count += 4) {
+        for (with_tpm = 0; with_tpm < 2; with_tpm++) {
+            uint32_t pa = with_tpm ? 0x0c000000 : 0;
+            saw_acpi = 0;
+            saw_madt = 0;
+            hv_acpi_build_and_register(NULL, cpu_count, 6ULL << 30, 0, 0, pa);
+            assert(saw_acpi == with_tpm && saw_madt == 1);
+            size_t size = 0;
+            uint8_t *tree = hv_fdt_build_virt(cpu_count, 0x40000000, 6ULL << 30, pa, &size);
+            assert(tree);
+            assert(contains(tree, size, "cpu@3") && !contains(tree, size, "cpu@8"));
+            assert(contains(tree, size, "cpu@7") == (cpu_count == 8));
+            assert(contains(tree, size, "tcg,tpm-tis-mmio") == with_tpm);
+            assert(contains(tree, size, "tpm@c000000") == with_tpm);
+            free(tree);
+        }
     }
     return 0;
 }

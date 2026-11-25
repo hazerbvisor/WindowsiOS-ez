@@ -34,7 +34,15 @@ enum VMFoundationTests {
         hardware.customJITMiB = 0
         try rejects { try hardware.validate() }
         hardware.customJITMiB = 384
-        hardware.vCPUs = 5
+        for count in 5...8 {
+            hardware.vCPUs = count
+            try hardware.validate()
+            let decoded = try JSONDecoder().decode(VMHardware.self, from: JSONEncoder().encode(hardware))
+            precondition(decoded.vCPUs == count)
+        }
+        hardware.vCPUs = 9
+        try rejects { try hardware.validate() }
+        hardware.vCPUs = 0
         try rejects { try hardware.validate() }
         hardware.vCPUs = 1
         try hardware.validate()

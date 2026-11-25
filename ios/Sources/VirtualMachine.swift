@@ -19,6 +19,7 @@ enum HardwarePreset: String, CaseIterable, Codable, Identifiable {
 }
 
 struct VMHardware: Codable, Equatable {
+    static let vCPURange = 1...8
     var preset: HardwarePreset = .automatic
     var customRAMMiB = 4608
     var customJITMiB = 384
@@ -29,7 +30,9 @@ struct VMHardware: Codable, Equatable {
     var jitMiB: Int { jitOverrideMiB ?? preset.settings?.jitMiB ?? (preset == .custom ? customJITMiB : 384) }
 
     func validate() throws {
-        guard (1...4).contains(vCPUs) else { throw VMError.message("Choose one to four virtual CPUs.") }
+        guard Self.vCPURange.contains(vCPUs) else {
+            throw VMError.message("Choose \(Self.vCPURange.lowerBound)–\(Self.vCPURange.upperBound) virtual CPUs.")
+        }
         guard (preset != .custom || ramMiB >= 4096), jitMiB > 0 else {
             throw VMError.message("Windows 11 needs at least 4096 MiB of RAM and a nonzero JIT cache.")
         }

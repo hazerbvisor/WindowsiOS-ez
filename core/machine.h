@@ -107,11 +107,7 @@ typedef struct HvStats {
     uint64_t wfi, wfi_ticks;  /* WFI exits, host ticks spent asleep */
 } HvStats;
 
-#if TARGET_OS_IPHONE
-#define HV_MAX_CPUS 4
-#else
 #define HV_MAX_CPUS 8
-#endif
 #define HV_WHINT_MANY (1ull << 63) /* whint: more than three; else up to three TLB codes + 1, 16 bits each */
 
 /* What each CPU has to itself and keeps across hv_cpu_reset (tests copy HvCpu

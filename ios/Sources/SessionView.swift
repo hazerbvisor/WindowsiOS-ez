@@ -21,6 +21,7 @@ struct SessionView: View {
     @State private var typing = false
     @State private var controls = true
     @State private var details = false
+    @State private var openWindowsSettingsOnDismiss = false
     @State private var power = false
     @State private var clipboard = false
     @State private var scaling: GuestDisplayGeometry.Scaling = .fit
@@ -42,8 +43,10 @@ struct SessionView: View {
                 ZStack {
                     display
                     if !vm.isVMRunning { bootPanel }
+                }
+                .overlay(alignment: toolbarTop ? .top : .bottom) {
                     if !portrait && controls && vm.isVMRunning {
-                        toolbar.frame(maxHeight: .infinity, alignment: toolbarTop ? .top : .bottom)
+                        toolbar
                             .padding(.top, toolbarTop ? max(8, geometry.safeAreaInsets.top) + 6 : 0)
                             .padding(.bottom, toolbarTop ? 0 : max(8, geometry.safeAreaInsets.bottom) + 6)
                     }
@@ -58,8 +61,11 @@ struct SessionView: View {
         .ignoresSafeArea(edges: [.horizontal, .top])
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .sheet(isPresented: $details) {
-            SessionDetails(vm: vm, scaling: $scaling, relative: relative, leave: leave)
+        .sheet(isPresented: $details, onDismiss: finishDetails) {
+            SessionDetails(vm: vm, scaling: $scaling, relative: relative, leave: leave) {
+                openWindowsSettingsOnDismiss = true
+                details = false
+            }
         }
         .sheet(item: $vm.activeSafariURL) { item in SafariSheet(url: item.url) }
         .confirmationDialog("Windows power", isPresented: $power, titleVisibility: .visible) {
@@ -97,7 +103,6 @@ struct SessionView: View {
             hideTask?.cancel()
         }
         .onChange(of: focused) { _, value in input.suspend(!value) }
-        .onChange(of: details) { _, presenting in if !presenting { reveal() } }
         .onChange(of: power) { _, presenting in if !presenting { reveal() } }
         .onChange(of: typing) { _, _ in scheduleAutoHide() }
         .onChange(of: scaling) { _, _ in zoom = 1; offset = .zero }
@@ -178,7 +183,7 @@ struct SessionView: View {
 
     private var toolbar: some View {
         HStack(spacing: 4) {
-            control("Hide Controls", "chevron.compact.up") { controls = false }
+            control("Hide Controls", toolbarTop ? "chevron.up" : "chevron.down", action: hideControls)
             control(typing ? "Hide Keyboard" : "Show Keyboard", "keyboard") { typing.toggle() }
             control("Clipboard", "clipboard") { clipboard = true }
             control("Zoom", "plus.magnifyingglass") {
@@ -208,6 +213,7 @@ struct SessionView: View {
             scheduleAutoHide()
         } label: {
             Image(systemName: icon).frame(width: 39, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -267,6 +273,24 @@ struct SessionView: View {
     private func reveal() {
         controls = true
         scheduleAutoHide()
+    }
+
+    private func hideControls() {
+        hideTask?.cancel()
+        hideTask = nil
+        typing = false
+        editingZoom = false
+        controls = false
+    }
+
+    private func finishDetails() {
+        reveal()
+        guard openWindowsSettingsOnDismiss else { return }
+        openWindowsSettingsOnDismiss = false
+        guard focused, vm.usbKeyboardReady, vm.installationSession == nil else { return }
+        input.suspend(false)
+        input.reset()
+        input.keyStroke(0x0c, with: [0xe3]) // Windows + I
     }
 
     private func pasteText() {
@@ -339,6 +363,7 @@ private struct SessionDetails: View {
     @Binding var scaling: GuestDisplayGeometry.Scaling
     let relative: Bool
     let leave: () -> Void
+    let openWindowsSettings: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -353,7 +378,14 @@ private struct SessionDetails: View {
                 }
                 Section("Display") {
                     LabeledContent("Guest resolution", value: vm.fbWidth > 0 ? "\(vm.fbWidth) × \(vm.fbHeight)" : "Unavailable")
-                    Picker("Scaling", selection: $scaling) {
+                    if vm.installationSession == nil {
+                        Button("Change Windows Resolution", systemImage: "display", action: openWindowsSettings)
+                            .disabled(!vm.usbKeyboardReady)
+                        Text("In Windows Settings, go to System → Display and choose a higher or lower display resolution if the adapter offers one.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Picker("iPad or iPhone scaling", selection: $scaling) {
                         ForEach(GuestDisplayGeometry.Scaling.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
                     LabeledContent("Frames presented", value: vm.presentedFrames.formatted())

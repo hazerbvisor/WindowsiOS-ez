@@ -630,7 +630,7 @@ private struct MachineEditor<Actions: View>: View {
             } header: {
                 Text("Screen")
             } footer: {
-                Text("Windows reports the guest resolution in Session Details. Scaling applies when you open the session. Available guest resolutions depend on firmware and Windows.")
+                Text("To change the guest resolution, open Session Details while Windows is running. The resolutions you can choose depend on the Windows display adapter. Host scaling applies when you open the session.")
             }
             Section("Storage") {
                 if let disk {
@@ -689,8 +689,14 @@ struct HardwareFields: View {
                 Text("High guest RAM can cause iPadOS memory pressure or end the app session.")
             }
         }
-        Section("Processors") {
-            Stepper("Virtual CPUs · \(hardware.vCPUs)", value: $hardware.vCPUs, in: 1...4)
+        Section {
+            Stepper("Virtual CPUs · \(hardware.vCPUs)", value: $hardware.vCPUs, in: VMHardware.vCPURange)
+        } header: {
+            Text("Processors")
+        } footer: {
+            if hardware.vCPUs > 4 {
+                Text("5–8 virtual CPUs are experimental on iPadOS. More virtual CPUs can increase memory use and may reduce performance.")
+            }
         }
         Section {
             Menu {
