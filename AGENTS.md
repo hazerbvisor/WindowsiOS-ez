@@ -7,3 +7,4 @@
 - Reuse the sparse disk format and preserve source archives, existing VM disks and writable per-VM NVRAM. Treat imported structures as untrusted input.
 - Use [TESTING.md](TESTING.md) for verification and update [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) with the evidence. Record Xcode build, simulator and physical-device results separately.
 - Keep the UI overhaul on `feat/henge-ui-overhaul`, based on the published DISM build `fefa1a6`. Treat older manifests as valid and keep guest framebuffer modes separate from host scaling. Preserve the existing boot and provisioning paths.
+- Keep experimental graphics development on `experimental/metal-gpu`, based on the UI build `ba7fde7`. Keep RAMFB as the default and follow the hardware validation gates in [the MetalGPU roadmap](docs/METALGPU_ROADMAP.md).

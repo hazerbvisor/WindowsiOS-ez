@@ -29,6 +29,14 @@ Exercise sustained guest load and record JIT flushes, memory pressure and alloca
 
 Report status separately as implemented, static validation passed, compilation passed, simulator tested, physical device tested or unverified. A locally validated archive fixture establishes verifier behavior. An actual device build and a device run establish the corresponding binary and runtime results.
 
+## MetalGPU and session changes
+
+Run `python3 -m unittest discover -s tests -p test_virtio_gpu.py` to compile and exercise the portable 2D device with the real PCI and split-queue code. For Clang ASan/UBSan also set `VIRTIO_GPU_TEST_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"`. See [the graphics compatibility procedure](docs/METALGPU_COMPATIBILITY.md) for testing PCI enumeration, signed driver installation and RAMFB recovery on a copied VM.
+
+On the RAMFB baseline, hide the toolbar with the chevron in portrait and landscape, including with the toolbar positioned at the bottom. Verify it closes any keyboard and zoom controls and that the display remains interactive. Use the four-finger tap or the input surface's accessibility action to reopen it. Repeat with physical mouse or trackpad, and with auto-hide enabled. In Session Details, choose **Change Windows Resolution**, confirm Windows Settings opens, and try a lower and higher resolution if Windows offers them. Compare the guest dimensions in Windows and Session Details, then verify pointer alignment. Confirm host scaling leaves the displayed guest dimensions unchanged.
+
+With balanced RAM/JIT and RAMFB, test a known-good four-vCPU boot, then 5, 6, 7 and 8 vCPUs independently. Verify the guest processor count after each restart, run a multi-threaded guest workload, and exercise guest restart and app interruptions. Export diagnostics and record times, warnings and any regressions. Use the last known stable count after a failed run.
+
 ## Library, media and preparation checks
 
 The portable suite uses Swift when `swiftc` is on PATH or set through `SWIFTC`. For the filesystem fixture tests, set `GENISOIMAGE`, `UDFREAD_HEADER` and `UDFREAD_LIBRARY` to genisoimage, the pinned libudfread source header with `blockinput.h` alongside it, and a host static archive built from the revision in `scripts/build_ios_deps.sh`. Linux host SHA-256 tests link against OpenSSL. The fixtures cover UDF, Joliet, ISO9660, fallback from unreadable UDF, multi-extent copying, malformed extents, architecture, build and checksum ordering.
