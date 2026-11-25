@@ -5,7 +5,7 @@
 /* VirtIO 1.2 GPU wire fields are little-endian; do not cast guest buffers. */
 enum {
     GET_INFO=0x108, GET_CAP=0x109, UNREF=0x102, CREATE_BLOB=0x10c,
-    CTX_CREATE=0x200, CTX_DESTROY, CTX_ATTACH, CTX_DETACH,
+    CTX_CREATE=0x200, CTX_DESTROY, CTX_ATTACH, CTX_DETACH, CREATE_3D,
     SUBMIT=0x207, MAP=0x208, UNMAP=0x209,
     OK=0x1100, OK_INFO=0x1102, OK_CAP=0x1103, OK_MAP=0x1106,
     ERROR=0x1200, INVALID=0x1205, HDR=24, FENCE=1, RING=2
@@ -41,22 +41,23 @@ size_t hv_neptune_wire_command(HvNeptune *n,const void *request,size_t length,
     switch(type) {
     case GET_INFO: {
         uint8_t cap[HV_NPT_MAX_CAPSET]; uint32_t version=0,size=0;
-        if (length!=32 || ctx || get32(q+24)!=0 || capacity<40 ||
-            hv_neptune_capset(n,cap,sizeof(cap),&version,&size)) break;
+        if (length!=32 || ctx || get32(q+24)>1 || capacity<40) break;
+        uint32_t id=get32(q+24)==0?HV_NPT_CAPSET:2;
+        if (hv_neptune_capset_id(n,id,cap,sizeof(cap),&version,&size)) break;
         memset(r+HDR,0,16);
-        put32(r+24,HV_NPT_CAPSET); put32(r+28,version); put32(r+32,size);
+        put32(r+24,id); put32(r+28,version); put32(r+32,size);
         rc=OK_INFO; out=40; break;
     }
     case GET_CAP: {
         uint8_t cap[HV_NPT_MAX_CAPSET]; uint32_t version=0,size=0;
-        if (length!=32 || ctx || get32(q+24)!=HV_NPT_CAPSET ||
-            hv_neptune_capset(n,cap,sizeof(cap),&version,&size) ||
+        if (length!=32 || ctx ||
+            hv_neptune_capset_id(n,get32(q+24),cap,sizeof(cap),&version,&size) ||
             get32(q+28)!=version || size>sizeof(cap) || size>capacity-HDR) break;
         memcpy(r+HDR,cap,size); rc=OK_CAP; out=HDR+size; break;
     }
     case CTX_CREATE:
-        if (length==96 && ctx && get32(q+24)<=64 && get32(q+28)==HV_NPT_CAPSET)
-            ret=hv_neptune_context_create(n,ctx,(const char *)(q+32),get32(q+24));
+        if (length==96 && ctx && get32(q+24)<=64)
+            ret=hv_neptune_context_create_cap(n,ctx,get32(q+28),(const char *)(q+32),get32(q+24));
         break;
     case CTX_DESTROY:
         if (length==HDR && ctx) ret=hv_neptune_context_destroy(n,ctx);
@@ -64,6 +65,13 @@ size_t hv_neptune_wire_command(HvNeptune *n,const void *request,size_t length,
     case CTX_ATTACH: case CTX_DETACH:
         if (length==32 && ctx) ret=hv_neptune_blob_attach(n,ctx,get32(q+24),type==CTX_ATTACH);
         break;
+    case CREATE_3D: {
+        if (length!=72 || ctx) break;
+        uint32_t args[11];
+        for (unsigned i=0;i<11;++i) args[i]=get32(q+24+i*4);
+        ret=hv_neptune_create_3d(n,args);
+        break;
+    }
     case CREATE_BLOB:
         /* Only HOST3D without guest scatter entries is implemented. */
         if (length==56 && ctx && get32(q+28)==2 && get32(q+36)==0)
@@ -82,11 +90,13 @@ size_t hv_neptune_wire_command(HvNeptune *n,const void *request,size_t length,
         if (length==32) ret=hv_neptune_blob_destroy(n,get32(q+24));
         break;
     case SUBMIT: {
-        if (length<32 || !ctx || ((flags&FENCE)&&!(flags&RING))) break;
+        if (length<32 || !ctx) break;
         uint32_t bytes=get32(q+24);
         if (!bytes || bytes%4 || bytes>HV_NPT_MAX_SUBMIT || bytes!=length-32) break;
         ret=hv_neptune_submit(n,ctx,q+32,bytes);
-        if (!ret && (flags&FENCE) && hv_neptune_fence_submit(n,ctx,ring,guest_fence,ticket)) {
+        if (!ret && (flags&FENCE) && ((flags&RING)?
+            hv_neptune_fence_submit(n,ctx,ring,guest_fence,ticket):
+            hv_neptune_fence_submit_legacy(n,ctx,guest_fence,ticket))) {
             *ticket=0; rc=ERROR; goto done;
         }
         break;

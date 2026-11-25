@@ -4,6 +4,7 @@
 #if defined(WINIOS_ENABLE_NEPTUNE)
 #define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include <virglrenderer.h>
+#include "neptune_angle.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
@@ -18,7 +19,7 @@ typedef struct Blob {
 } Blob;
 typedef struct Pending {
     HvNeptuneFence fence;
-    bool done;
+    bool done, legacy;
 } Pending;
 
 #define NPT_API(X) \
@@ -27,12 +28,14 @@ typedef struct Pending {
  X(virgl_renderer_context_create_with_flags) X(virgl_renderer_context_destroy) \
  X(virgl_renderer_submit_cmd) X(virgl_renderer_context_create_fence) \
  X(virgl_renderer_context_poll) X(virgl_renderer_resource_create_blob) \
+ X(virgl_renderer_create_fence) X(virgl_renderer_poll) X(virgl_renderer_resource_create) \
  X(virgl_renderer_resource_map) X(virgl_renderer_resource_unmap) \
  X(virgl_renderer_resource_get_map_info) X(virgl_renderer_resource_unref) \
  X(virgl_renderer_ctx_attach_resource) X(virgl_renderer_ctx_detach_resource) \
  X(virgl_renderer_create_handle_for_scanout) X(virgl_renderer_release_handle_for_scanout)
 struct HvNeptune {
     void *renderer, *dxmt;
+    HvNptAngle angle;
 #define FIELD(sym) __typeof__(&sym) sym;
     NPT_API(FIELD)
 #undef FIELD
@@ -60,7 +63,28 @@ static Blob *blob(HvNeptune *n, uint32_t id) {
         if (n->blobs[i].id==id) return &n->blobs[i];
     return NULL;
 }
-static void old_fence(void *cookie, uint32_t fence) { (void)cookie; (void)fence; }
+static void old_fence(void *cookie,uint32_t fence) {
+    HvNeptune *n=cookie;
+    pthread_mutex_lock(&n->mutex);
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) {
+        Pending *p=&n->pending[i];
+        if (p->legacy && p->fence.ticket && p->fence.ticket<=fence) p->done=true;
+    }
+    pthread_mutex_unlock(&n->mutex);
+}
+static void *egl_display(void *cookie) { return ((HvNeptune *)cookie)->angle.display; }
+static virgl_renderer_gl_context create_gl(void *cookie,int scanout,struct virgl_renderer_gl_ctx_param *p) {
+    (void)scanout;
+    return hv_npt_angle_context(&((HvNeptune *)cookie)->angle,p->major_ver,p->minor_ver,p->shared);
+}
+static void destroy_gl(void *cookie,virgl_renderer_gl_context context) {
+    HvNptAngle *a=&((HvNeptune *)cookie)->angle;
+    if (context) a->destroy_context(a->display,(EGLContext)context);
+}
+static int current_gl(void *cookie,int scanout,virgl_renderer_gl_context context) {
+    (void)scanout;
+    return hv_npt_angle_current(&((HvNeptune *)cookie)->angle,(EGLContext)context);
+}
 static void context_fence(void *cookie, uint32_t context, uint32_t ring, uint64_t ticket) {
     HvNeptune *n=cookie;
     pthread_mutex_lock(&n->mutex);
@@ -93,6 +117,7 @@ HvNeptune *hv_neptune_open(const char *renderer_path, const char *dxmt_path) {
         setenv("NPT_D3D11_LIBRARY_PATH",dxmt_path,1) ||
         setenv("NPT_DXGI_LIBRARY_PATH",dxmt_path,1) ||
         setenv("NPT_D3D12_LIBRARY_PATH","/nonexistent/windowsios-dx12-disabled",1)) goto fail;
+    if (!hv_npt_angle_open(&n->angle,getenv("WINIOS_NEPTUNE_EGL"))) goto fail;
     n->renderer=dlopen(renderer_path,RTLD_LOCAL|RTLD_NOW);
     if (!n->renderer) goto fail;
 #define LOAD(sym) do { \
@@ -104,14 +129,19 @@ HvNeptune *hv_neptune_open(const char *renderer_path, const char *dxmt_path) {
     n->callbacks.version=VIRGL_RENDERER_CALLBACKS_VERSION;
     n->callbacks.write_fence=old_fence;
     n->callbacks.write_context_fence=context_fence;
-    /* No GL, Venus, Vulkan or external renderer process. Build the pinned
-     * renderer with render-server-mode=thread and worker=thread. */
-    int flags=VIRGL_RENDERER_NO_VIRGL|VIRGL_RENDERER_NEPTUNE|
-              VIRGL_RENDERER_RENDER_SERVER|VIRGL_RENDERER_THREAD_SYNC;
+    /* Actual VirGL shadow contexts run through ANGLE's Metal backend;
+     * DirectX 11 still goes only through Neptune/DXMT. */
+    n->callbacks.create_gl_context=create_gl;
+    n->callbacks.destroy_gl_context=destroy_gl;
+    n->callbacks.make_current=current_gl;
+    n->callbacks.get_egl_display=egl_display;
+    int flags=VIRGL_RENDERER_USE_GLES|VIRGL_RENDERER_NATIVE_SHARE_TEXTURE|
+              VIRGL_RENDERER_NEPTUNE|VIRGL_RENDERER_RENDER_SERVER|VIRGL_RENDERER_THREAD_SYNC;
     if (n->virgl_renderer_init(n,flags,&n->callbacks)) goto fail;
     n->initialized=true;
     uint8_t caps[HV_NPT_MAX_CAPSET]; uint32_t version=0,size=0;
-    if (hv_neptune_capset(n,caps,sizeof(caps),&version,&size)) goto fail;
+    if (hv_neptune_capset(n,caps,sizeof(caps),&version,&size) ||
+        hv_neptune_capset_id(n,2,caps,sizeof(caps),&version,&size)) goto fail;
     return n;
 fail:
     hv_neptune_close(n);
@@ -121,26 +151,33 @@ fail_instance:
     return NULL;
 }
 
-int hv_neptune_capset(HvNeptune *n, void *out, size_t capacity, uint32_t *version, uint32_t *size) {
-    if (!n || !n->initialized || !out || !version || !size) return -1;
+int hv_neptune_capset(HvNeptune *n,void *out,size_t capacity,uint32_t *version,uint32_t *size) {
+    return hv_neptune_capset_id(n,HV_NPT_CAPSET,out,capacity,version,size);
+}
+int hv_neptune_capset_id(HvNeptune *n,uint32_t id,void *out,size_t capacity,uint32_t *version,uint32_t *size) {
+    if (!n || !n->initialized || !out || !version || !size || (id!=2 && id!=HV_NPT_CAPSET)) return -1;
     uint32_t v=0,s=0;
-    n->virgl_renderer_get_cap_set(HV_NPT_CAPSET,&v,&s);
+    n->virgl_renderer_get_cap_set(id,&v,&s);
     if (s<8 || s>HV_NPT_MAX_CAPSET || s>capacity) return -1;
     memset(out,0,s);
-    n->virgl_renderer_fill_caps(HV_NPT_CAPSET,v,out);
+    n->virgl_renderer_fill_caps(id,v,out);
     /* Pinned Neptune v2 capset has wire_format_version as the first u32. */
     uint32_t wire; memcpy(&wire,out,sizeof(wire));
-    if (wire!=2) return -1;
+    if (id==HV_NPT_CAPSET && wire!=2) return -1;
     *version=v; *size=s;
     return 0;
 }
 
 int hv_neptune_context_create(HvNeptune *n,uint32_t id,const char *name,size_t length) {
+    return hv_neptune_context_create_cap(n,id,HV_NPT_CAPSET,name,length);
+}
+int hv_neptune_context_create_cap(HvNeptune *n,uint32_t id,uint32_t capset,const char *name,size_t length) {
+    if (capset!=2 && capset!=HV_NPT_CAPSET) return -1;
     if (!n || !id || id>INT32_MAX || length>64 || (length && !name) || context_slot(n,id)>=0) return -1;
     for (size_t i=0;i<HV_NPT_MAX_CONTEXTS;++i) if (!n->contexts[i]) {
         char safe[65]={0};
         if (length) memcpy(safe,name,length);
-        if (n->virgl_renderer_context_create_with_flags(id,HV_NPT_CAPSET,(uint32_t)length,safe)) return -1;
+        if (n->virgl_renderer_context_create_with_flags(id,capset,(uint32_t)length,safe)) return -1;
         n->contexts[i]=id;
         return 0;
     }
@@ -176,6 +213,27 @@ int hv_neptune_submit(HvNeptune *n,uint32_t context,const void *command,size_t b
     return ret ? -1 : 0;
 }
 
+/* Typed shadow textures use the same resource namespace and conservative
+ * allocation accounting. Initial candidate supports single-level 2D only. */
+int hv_neptune_create_3d(HvNeptune *n,const uint32_t a[11]) {
+    if (!n || !a || !a[0] || blob(n,a[0]) || a[1]!=2 ||
+        !a[4] || !a[5] || a[4]>4096 || a[5]>4096 ||
+        a[6]!=1 || a[7]!=1 || a[8]!=0 || a[9]>1 || (a[10]&~1u)) return -1;
+    uint64_t bytes=(uint64_t)a[4]*a[5]*16;
+    if (bytes>HV_NPT_BLOB_BUDGET-n->allocated) return -1;
+    for (size_t i=0;i<HV_NPT_MAX_BLOBS;++i) if (!n->blobs[i].id) {
+        struct virgl_renderer_resource_create_args args={
+            .handle=a[0],.target=a[1],.format=a[2],.bind=a[3],.width=a[4],
+            .height=a[5],.depth=a[6],.array_size=a[7],.last_level=a[8],.nr_samples=a[9],.flags=a[10]
+        };
+        if (n->virgl_renderer_resource_create(&args,NULL,0)) return -1;
+        n->blobs[i]=(Blob){.id=a[0],.bytes=bytes};
+        n->allocated+=bytes;
+        return 0;
+    }
+    return -1;
+}
+
 int hv_neptune_blob_create(HvNeptune *n,uint32_t context,uint32_t resource,uint64_t blob_id,uint64_t bytes,uint32_t flags) {
     if (!n || context_slot(n,context)<0 || !resource || resource>INT32_MAX ||
         blob(n,resource) || !bytes || bytes>HV_NPT_BLOB_BUDGET-n->allocated ||
@@ -195,7 +253,7 @@ int hv_neptune_blob_create(HvNeptune *n,uint32_t context,uint32_t resource,uint6
 
 int hv_neptune_blob_attach(HvNeptune *n,uint32_t context,uint32_t resource,bool attach) {
     Blob *b=n?blob(n,resource):NULL;
-    if (!b || b->context!=context || context_slot(n,context)<0) return -1;
+    if (!b || context_slot(n,context)<0) return -1;
     if (attach) n->virgl_renderer_ctx_attach_resource((int)context,(int)resource);
     else n->virgl_renderer_ctx_detach_resource((int)context,(int)resource);
     return 0;
@@ -322,8 +380,26 @@ int hv_neptune_fence_submit(HvNeptune *n,uint32_t context,uint32_t ring,uint64_t
     return 0;
 }
 
+int hv_neptune_fence_submit_legacy(HvNeptune *n,uint32_t context,uint64_t guest_id,uint64_t *ticket) {
+    if (!n || !ticket || context_slot(n,context)<0) return -1;
+    pthread_mutex_lock(&n->mutex);
+    if (n->next_ticket>=INT32_MAX) { pthread_mutex_unlock(&n->mutex); return -1; }
+    Pending *p=NULL;
+    for (size_t i=0;i<HV_NPT_MAX_FENCES;++i) if (!n->pending[i].fence.ticket) { p=&n->pending[i]; break; }
+    if (!p) { pthread_mutex_unlock(&n->mutex); return -1; }
+    uint64_t id=++n->next_ticket;
+    *p=(Pending){.fence={.context=context,.guest_id=guest_id,.ticket=id},.legacy=true};
+    pthread_mutex_unlock(&n->mutex);
+    if (n->virgl_renderer_create_fence((int)id,context)) {
+        pthread_mutex_lock(&n->mutex); *p=(Pending){0}; pthread_mutex_unlock(&n->mutex);
+        return -1;
+    }
+    *ticket=id; return 0;
+}
+
 void hv_neptune_poll(HvNeptune *n) {
     if (!n) return;
+    n->virgl_renderer_poll();
     for (size_t i=0;i<HV_NPT_MAX_CONTEXTS;++i)
         if (n->contexts[i]) n->virgl_renderer_context_poll(n->contexts[i]);
 }
@@ -355,6 +431,7 @@ void hv_neptune_close(HvNeptune *n) {
     }
     if (n->renderer) dlclose(n->renderer);
     if (n->dxmt) dlclose(n->dxmt);
+    hv_npt_angle_close(&n->angle);
     pthread_mutex_destroy(&n->mutex);
     free(n);
     pthread_mutex_lock(&instance_lock); instance_live=false; pthread_mutex_unlock(&instance_lock);

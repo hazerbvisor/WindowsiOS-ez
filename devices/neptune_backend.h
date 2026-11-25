@@ -28,6 +28,10 @@ HvNeptune *hv_neptune_open(const char *renderer_path, const char *dxmt_path);
 void hv_neptune_close(HvNeptune *n);
 int hv_neptune_capset(HvNeptune *n, void *out, size_t capacity, uint32_t *version, uint32_t *size);
 int hv_neptune_context_create(HvNeptune *n, uint32_t id, const char *name, size_t length);
+int hv_neptune_context_create_cap(HvNeptune *n,uint32_t id,uint32_t capset,const char *name,size_t length);
+int hv_neptune_capset_id(HvNeptune *n,uint32_t id,void *out,size_t capacity,uint32_t *version,uint32_t *size);
+int hv_neptune_create_3d(HvNeptune *n,const uint32_t args[11]);
+int hv_neptune_fence_submit_legacy(HvNeptune *n,uint32_t context,uint64_t guest_id,uint64_t *ticket);
 int hv_neptune_context_destroy(HvNeptune *n, uint32_t id);
 int hv_neptune_submit(HvNeptune *n, uint32_t context, const void *command, size_t bytes);
 int hv_neptune_blob_create(HvNeptune *n, uint32_t context, uint32_t resource,

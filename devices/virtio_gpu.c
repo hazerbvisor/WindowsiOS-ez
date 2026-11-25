@@ -538,7 +538,7 @@ static bool neptune_control(HvVirtioGpu *gpu,const HvVirtqElem *elem,uint32_t *w
             if (hv_virtq_read(v,elem,0,request,(uint32_t)length)==length) {
                 /* Keep the resource namespace common across 2D and 3D. */
                 uint32_t id=0;
-                if (hdr.type==0x10c && length>=28) memcpy(&id,request+24,4);
+                if ((hdr.type==0x10c || hdr.type==0x204) && length>=28) memcpy(&id,request+24,4);
                 if (id && lookup(gpu,id)) {
                     Header error=hdr; error.type=ERR_RESOURCE;
                     memcpy(reply,&error,sizeof(error)); n=sizeof(error);
@@ -614,10 +614,10 @@ void hv_virtio_gpu_start_neptune(HvVirtioGpu *gpu,int ncpus) {
     memcpy(cap+12,&lo,4); memcpy(cap+20,&hi,4);
     v->pci.config[0x34]=0xa0;
     v->features|=0x19; /* VIRGL transport, RESOURCE_BLOB, CONTEXT_INIT */
-    v->config[12]=1; /* Neptune only; explicitly NOT a v0.6-compatible device yet. */
+    v->config[12]=2; /* Actual Neptune and VirGL2 capsets, probed before activation. */
     v->m->cpu_aperture_opaque=gpu;
     v->m->cpu_aperture_ptr=neptune_cpu_ptr;
-    fprintf(stderr,"winvm: single-vCPU Neptune LAB transport enabled (native scanout candidate; no shadow VirGL)\n");
+    fprintf(stderr,"winvm: single-vCPU Neptune + ANGLE/VirGL shadow LAB transport enabled\n");
 #else
     (void)gpu; (void)ncpus;
 #endif
