@@ -19,7 +19,25 @@ fi
 
 python3 scripts/prepare_installer_assets.py
 ./scripts/build_ios_deps.sh
-make -j"$(sysctl -n hw.ncpu)" ios-lib
+LAB="${WINIOS_NEPTUNE_LAB:-0}"
+OUT="$ROOT/build/artifacts"
+# Never reuse an archive compiled with the other feature configuration.
+if [[ "$LAB" == 1 ]]; then
+    : "${NEPTUNE_IOS_DEPS_PREFIX:?Set the physical iOS ANGLE/libepoxy/epoll-shim prefix}"
+    : "${DXMT_IOS_LLVM_PREFIX:?Set the physical iOS LLVM 15.0.7 prefix}"
+    bash scripts/build_dxmt_probe.sh
+    bash scripts/build_neptune_backend.sh
+    NPT="$ROOT/work/metalgpu-neptune/dd0652b13e589c4c124ea79123a3adcd85173f4f/install"
+    DXMT="$ROOT/work/metalgpu-dxmt/1fe2e752c98207518a99c9322482f63ebb9f0232/install"
+    HDR="$NPT/include/virgl"
+    [[ -f "$HDR/virglrenderer.h" ]] || HDR="$NPT/include"
+    rm -rf build/ios
+    make -j"$(sysctl -n hw.ncpu)" ios-lib WINIOS_NEPTUNE_LAB=1 NEPTUNE_HEADERS="$HDR" NEPTUNE_DEP_HEADERS="$NEPTUNE_IOS_DEPS_PREFIX/include"
+    OUT="$OUT/metalgpu-lab"
+else
+    rm -rf build/ios
+    make -j"$(sysctl -n hw.ncpu)" ios-lib WINIOS_NEPTUNE_LAB=0
+fi
 for archive in build/ios/libwinvm.a ios/deps/lib/{libslirp,libglib-2.0,libintl,libpcre2-8,libffi,libudfread,libfatfs,libwim,libtpms,libcrypto}.a; do
     test "$(xcrun lipo -archs "$archive")" = arm64
 done
@@ -55,6 +73,11 @@ for archive in libwinvm.a libslirp.a libglib-2.0.a libudfread.a libfatfs.a libwi
     fi
 done
 
+if [[ "$LAB" == 1 ]]; then
+    python3 scripts/stage_neptune_ipa.py "$APP" "$NPT/lib/libvirglrenderer.dylib" "$DXMT/lib/libdxmt-native.dylib" \
+        "$NEPTUNE_IOS_DEPS_PREFIX/lib/libEGL.dylib" "$NPT/lib" "$DXMT/lib" "$NEPTUNE_IOS_DEPS_PREFIX/lib"
+fi
+
 mkdir "$STAGE/Payload"
 ditto "$APP" "$STAGE/Payload/WindowsiOS.app"
 (
@@ -68,4 +91,5 @@ cp ios/WindowsiOS.entitlements "$STAGE/WindowsiOS-ez.entitlements"
     shasum -a 256 WindowsiOS-ez.ipa WindowsiOS-ez.entitlements > SHA256SUMS
     shasum -a 256 -c SHA256SUMS
 )
-mv "$STAGE/WindowsiOS-ez.ipa" "$STAGE/WindowsiOS-ez.entitlements" "$STAGE/SHA256SUMS" build/artifacts/
+mkdir -p "$OUT"
+mv "$STAGE/WindowsiOS-ez.ipa" "$STAGE/WindowsiOS-ez.entitlements" "$STAGE/SHA256SUMS" "$OUT/"

@@ -549,6 +549,29 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     // Set it explicitly for each launch, so a previous preference cannot affect another VM.
     if (experimentalGraphics && !installer) setenv("WINIOS_VIRTIO_GPU", "1", 1);
     else unsetenv("WINIOS_VIRTIO_GPU");
+    unsetenv("WINIOS_NEPTUNE_LAB");
+    unsetenv("WINIOS_NEPTUNE_RENDERER");
+    unsetenv("WINIOS_NEPTUNE_DXMT");
+    unsetenv("WINIOS_NEPTUNE_EGL");
+    // Only the separately built lab IPA has this manifest. The explicit
+    // VM graphics opt-in and one vCPU are still required.
+    if (experimentalGraphics && !installer && cpus == 1) {
+        NSURL *marker = [NSBundle.mainBundle URLForResource:@"MetalGPULab" withExtension:@"plist"];
+        NSDictionary *libs = marker ? [NSDictionary dictionaryWithContentsOfURL:marker] : nil;
+        NSString *folder = NSBundle.mainBundle.privateFrameworksPath;
+        NSArray *keys = @[@"Renderer", @"DXMT", @"EGL"];
+        NSArray *names = @[@"libvirglrenderer.dylib", @"libdxmt-native.dylib", @"libEGL.dylib"];
+        const char *vars[] = {"WINIOS_NEPTUNE_RENDERER","WINIOS_NEPTUNE_DXMT","WINIOS_NEPTUNE_EGL"};
+        BOOL available = folder != nil && libs != nil;
+        for (NSUInteger i=0; available && i<keys.count; ++i) {
+            NSString *name=libs[keys[i]];
+            if (![name isEqual:names[i]]) { available=NO; break; }
+            NSString *path=[folder stringByAppendingPathComponent:name];
+            if (![NSFileManager.defaultManager fileExistsAtPath:path] ||
+                setenv(vars[i],path.fileSystemRepresentation,1)) available=NO;
+        }
+        if (available) setenv("WINIOS_NEPTUNE_LAB","1",1);
+    }
     int createResult = hv_winvm_create(&cfg, err, sizeof err);
     unsetenv("WINIOS_VIRTIO_GPU");
     if (createResult != 0) {
@@ -849,6 +872,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (NSUInteger)mappedJITMiB { return winios_jit_mapping().size >> 20; }
 - (BOOL)guestShareAvailable { return _vmRunning && hv_winvm_share_up(); }
+- (BOOL)metalGPULabActive {
+    if (!_vmRunning) return NO;
+    char status[1024]={0};
+    hv_winvm_graphics_diagnostics(status,sizeof status);
+    return strstr(status,"adapter=Neptune-LAB")!=NULL;
+}
 - (void)setPresentationRate:(unsigned int)fps { hv_winvm_set_presentation_rate(fps); }
 
 - (void)stopVM {

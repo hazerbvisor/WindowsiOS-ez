@@ -641,7 +641,7 @@ private struct MachineEditor<Actions: View>: View {
                     NavigationLink("Display driver installation") { MetalGPUDriverView() }
                 }
             } header: { Text("Graphics") } footer: {
-                Text("RAMFB is the default. This opt-in is display-only, not DirectX acceleration. Save before starting Windows. Shut down and relaunch the app with this off to recover. Setup always uses RAMFB.")
+                Text("RAMFB is the default. Ordinary builds offer display-only. A separate MetalGPU lab IPA requires one vCPU and a backed-up installed VM. Save before starting Windows. Shut down and relaunch the app with this off to recover. Setup always uses RAMFB.")
             }
             Section("Storage") {
                 if let disk {

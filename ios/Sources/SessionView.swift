@@ -392,8 +392,8 @@ private struct SessionDetails: View {
                 }
                 if vm.experimentalGraphicsRequested && vm.installationSession == nil {
                     Section("Experimental graphics") {
-                        NavigationLink("Install display driver") { MetalGPUDriverView() }
-                        Text("VirtIO-GPU requested; device and driver status must be verified in Windows. No 3D acceleration in this build.")
+                        NavigationLink("Install graphics driver") { MetalGPUDriverView() }
+                        Text("VirtIO-GPU requested; verify the initialized backend and Windows driver status. Lab acceleration is experimental.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
