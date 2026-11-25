@@ -2,6 +2,7 @@
 #define WINVM_FB_DISPLAY_H
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "fw_cfg.h"
@@ -50,6 +51,7 @@ void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uin
 /* Metal layer presentation & PNG screenshot helpers (implemented in devices/fb_metal.m) */
 void hv_fb_metal_set_layer(HvFbDisplay *fb, void *ca_metal_layer);
 void hv_fb_metal_set_rate(HvFbDisplay *fb, unsigned fps);
+void hv_fb_metal_set_cpu_readback(HvFbDisplay *fb, bool enabled);
 uint64_t hv_fb_metal_frames(HvFbDisplay *fb);
 void hv_fb_metal_diagnostics(HvFbDisplay *fb,char *buffer,size_t capacity);
 int hv_fb_save_png(HvFbDisplay *fb, const char *path);

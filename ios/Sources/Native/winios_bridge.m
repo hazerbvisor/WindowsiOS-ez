@@ -905,6 +905,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 - (void)setPresentationRate:(unsigned int)fps { hv_winvm_set_presentation_rate(fps); }
 
+- (void)setScanoutCPUReadback:(BOOL)enabled {
+    _scanoutCPUReadback = enabled;
+    hv_winvm_set_cpu_readback(enabled);
+}
+
 - (void)stopVM {
     if (!_vmRunning) return;
     hv_winvm_stop();

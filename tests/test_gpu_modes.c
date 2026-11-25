@@ -17,5 +17,9 @@ int main(void) {
     assert((edid[38]+31)*8==1280 && edid[39]>>6==3);
     assert((edid[48]+31)*8==1920 && edid[49]>>6==3);
     for(unsigned i=128;i<1024;i++)assert(!edid[i]);
+    assert(hv_gpu_edid_available(0x10000001b,0x100000019,1));
+    assert(!hv_gpu_edid_available(0x10000001b,0x100000019,0));
+    assert(hv_gpu_edid_available(2,2,0));
+    assert(!hv_gpu_edid_available(0,0,1));
     return 0;
 }

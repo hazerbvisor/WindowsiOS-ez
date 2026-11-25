@@ -151,3 +151,14 @@ The second iPad diagnostic showed Metal-native scanout and four retired fences, 
 
 ### Native presentation candidate
 Device report after shared-memory fix: 85/85 context creations, 456/456 retired fences, three errors in 1246 commands, 22 scanout updates. Guest lock screen becomes visible on stop when native scanout is cleared to RAMFB. Test stable ANGLE external share root, periodic native re-sampling and retirement-triggered updates; presenter diagnostics distinguish submitted, completed, actually presented, invalid texture and drawable failures. Test native lock-screen interaction, resize, 1/6 vCPU, sustained rendering and stop/restart. No claim of explicit cross-API GPU synchronization or physical-device verification.
+
+### Context sharing and black-screen diagnostics
+
+The attached 7b944127 log has negotiated features `0x100000019`. Bit 1 (EDID) was offered but not accepted. The 32 missing destroys reflect idempotent requests for absent context IDs. They are separate from EGL/GL object lifetime. Pinned virglrenderer `vrend_renderer_check_fences` switches to ctx0 before polling. Its `do_wait` treats invalid GL sync as complete. The 351 retirement count alone cannot show that a frame contained valid pixels.
+
+1. Run the unsigned lab build through your existing signing and JIT workflow. Start the existing Windows VM with its current graphics settings, 6 vCPUs, 7680 MiB RAM and 1536 MiB JIT. Use the installed driver as-is.
+2. Compare normal presentation through boot, lock-screen animation, sign-in, resize and a guest restart. Confirm `angle_share_verified=1`, inspect new renderer warnings and record `edid: offered=1 negotiated=0 compat_served=...` if the driver again omits the feature. If it does acknowledge the bit, a normal EDID reply is expected.
+3. If the screen is black or static, enable **Session Details → Experimental graphics → CPU readback diagnostics**, close the sheet, interact with the screen, then export diagnostics. Compare the changes in `samples`, `black`, `changed` and `errors`. If the CPU copy shows the desktop while direct presentation stays black, investigate native texture presentation or synchronization. If the copy is also black, the selected scanout texture has no visible RGB data at capture time. That result still allows a stale producer or cross-queue dependency problem. Compare renderer errors and the current scanout before drawing conclusions.
+4. Turn off readback for a normal-speed comparison, then test the same VM through the previous boot/recovery flow. Record any failure before stopping, since stopping can expose the separate RAMFB. Keep the same disk, firmware, TPM and Windows driver for paired comparisons.
+
+Portable tests cover the EGL context creation policy, EDID compatibility and readback layout and pixel classification. The iOS startup probe, renderer output, Metal readback and lock screen require distinct instrumented device results.

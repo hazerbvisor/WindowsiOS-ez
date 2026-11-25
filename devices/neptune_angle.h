@@ -9,6 +9,7 @@ typedef struct HvNptAngle {
     EGLConfig config;
     EGLContext root;
     EGLSurface surface;
+    bool share_verified;
     EGLBoolean (*initialize)(EGLDisplay,EGLint *,EGLint *);
     EGLBoolean (*terminate)(EGLDisplay);
     EGLBoolean (*bind_api)(EGLenum);
@@ -22,6 +23,6 @@ typedef struct HvNptAngle {
 } HvNptAngle;
 bool hv_npt_angle_open(HvNptAngle *a,const char *path);
 void hv_npt_angle_close(HvNptAngle *a);
-EGLContext hv_npt_angle_context(HvNptAngle *a,int major,int minor,bool shared);
+EGLContext hv_npt_angle_context(HvNptAngle *a,int major,int minor);
 int hv_npt_angle_current(HvNptAngle *a,EGLContext ctx);
 #endif

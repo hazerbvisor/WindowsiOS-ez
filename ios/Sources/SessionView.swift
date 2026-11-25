@@ -365,6 +365,7 @@ private struct SessionDetails: View {
     let leave: () -> Void
     let openWindowsSettings: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var cpuReadback = WinIOSBridge.shared.scanoutCPUReadback
 
     var body: some View {
         NavigationStack {
@@ -393,6 +394,16 @@ private struct SessionDetails: View {
                 if vm.experimentalGraphicsRequested && vm.installationSession == nil {
                     Section("Experimental graphics") {
                         NavigationLink("Install graphics driver") { MetalGPUDriverView() }
+                        if vm.isVMRunning && WinIOSBridge.shared.metalGPULabActive {
+                            Toggle("CPU readback diagnostics", isOn: $cpuReadback)
+                                .onChange(of: cpuReadback) { _, enabled in
+                                    WinIOSBridge.shared.scanoutCPUReadback = enabled
+                                    WinIOSBridge.shared.captureDiagnostics()
+                                }
+                            Text("Shows a CPU copy of the accelerated scanout at up to four frames per second. Export diagnostics to compare black and changing frames.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         Text("VirtIO-GPU requested; verify the initialized backend and Windows driver status. Lab acceleration is experimental.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)

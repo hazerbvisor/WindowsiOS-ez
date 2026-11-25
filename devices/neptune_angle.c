@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "neptune_angle.h"
+#include <GLES3/gl3.h>
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 /* ANGLE's published EGL extension constants. */
 #define NPT_PLATFORM_ANGLE 0x3202
@@ -15,13 +17,59 @@ typedef EGLDisplay (*GetPlatform)(EGLenum,void *,const EGLint *);
 typedef EGLBoolean (*QueryDisplay)(EGLDisplay,EGLint,intptr_t *);
 typedef EGLBoolean (*QueryDevice)(void *,EGLint,intptr_t *);
 
-EGLContext hv_npt_angle_context(HvNptAngle *a,int major,int minor,bool shared) {
+EGLContext hv_npt_angle_context(HvNptAngle *a,int major,int minor) {
     EGLint attrs[]={EGL_CONTEXT_CLIENT_VERSION,major,NPT_EGL_CONTEXT_MINOR,minor,EGL_NONE};
-    return a->create_context(a->display,a->config,shared?a->root:EGL_NO_CONTEXT,attrs);
+    /* Only the bootstrap context is unshared. Keep ctx0, guest subcontexts
+     * and the external EGL winsys on the same ANGLE display/share group. */
+    return a->create_context(a->display,a->config,a->root,attrs);
 }
 int hv_npt_angle_current(HvNptAngle *a,EGLContext ctx) {
     EGLSurface s=ctx==EGL_NO_CONTEXT?EGL_NO_SURFACE:a->surface;
     return a->make_current(a->display,s,s,ctx)?0:-1;
+}
+
+/* Exercise the actual ANGLE dispatch and object namespaces before handing the
+ * display to virglrenderer. FBO names themselves remain context-local. */
+static bool probe_share_group(HvNptAngle *a) {
+#define GL_PROC(sym) __typeof__(&sym) p_##sym = (__typeof__(&sym))a->get_proc(#sym); if (!p_##sym) return false
+    GL_PROC(glGenTextures); GL_PROC(glBindTexture); GL_PROC(glTexStorage2D); GL_PROC(glDeleteTextures);
+    GL_PROC(glGenFramebuffers); GL_PROC(glBindFramebuffer); GL_PROC(glFramebufferTexture2D);
+    GL_PROC(glCheckFramebufferStatus); GL_PROC(glDeleteFramebuffers); GL_PROC(glGetError);
+    GL_PROC(glFenceSync); GL_PROC(glFlush); GL_PROC(glIsSync); GL_PROC(glClientWaitSync); GL_PROC(glDeleteSync);
+#undef GL_PROC
+    EGLContext producer=hv_npt_angle_context(a,3,0);
+    EGLContext consumer=hv_npt_angle_context(a,3,0);
+    GLuint texture=0, target=0;
+    GLsync fence=NULL;
+    bool verified=false;
+    if (producer==EGL_NO_CONTEXT || consumer==EGL_NO_CONTEXT || hv_npt_angle_current(a,producer)) goto done;
+    p_glGenTextures(1,&texture);
+    p_glBindTexture(GL_TEXTURE_2D,texture);
+    p_glTexStorage2D(GL_TEXTURE_2D,1,GL_RGBA8,4,4);
+    fence=p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+    p_glFlush();
+    if (!texture || !fence || p_glGetError()!=GL_NO_ERROR || hv_npt_angle_current(a,consumer)) goto done;
+    p_glGenFramebuffers(1,&target);
+    p_glBindFramebuffer(GL_FRAMEBUFFER,target);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+    GLenum status=p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    GLenum wait=p_glIsSync(fence)?p_glClientWaitSync(fence,0,0):GL_WAIT_FAILED;
+    GLenum error=p_glGetError();
+    verified=status==GL_FRAMEBUFFER_COMPLETE && wait!=GL_WAIT_FAILED && error==GL_NO_ERROR;
+    if (!verified) fprintf(stderr,"winvm: ANGLE share probe framebuffer=0x%x wait=0x%x GL=0x%x\n",status,wait,error);
+    p_glDeleteFramebuffers(1,&target);
+done:
+    if (producer!=EGL_NO_CONTEXT && !hv_npt_angle_current(a,producer)) {
+        if (fence) p_glDeleteSync(fence);
+        if (texture) p_glDeleteTextures(1,&texture);
+    }
+    if (hv_npt_angle_current(a,a->root)) {
+        (void)hv_npt_angle_current(a,EGL_NO_CONTEXT);
+        verified=false;
+    }
+    if (consumer!=EGL_NO_CONTEXT) a->destroy_context(a->display,consumer);
+    if (producer!=EGL_NO_CONTEXT) a->destroy_context(a->display,producer);
+    return verified;
 }
 bool hv_npt_angle_open(HvNptAngle *a,const char *path) {
     memset(a,0,sizeof(*a));
@@ -52,8 +100,13 @@ bool hv_npt_angle_open(HvNptAngle *a,const char *path) {
     EGLint pb_attrs[]={EGL_WIDTH,1,EGL_HEIGHT,1,EGL_NONE};
     a->surface=a->create_pbuffer(a->display,a->config,pb_attrs);
     if (a->surface==EGL_NO_SURFACE) goto fail;
-    a->root=hv_npt_angle_context(a,3,0,false);
+    a->root=hv_npt_angle_context(a,3,0);
     if (a->root==EGL_NO_CONTEXT || hv_npt_angle_current(a,a->root)) goto fail;
+    a->share_verified=probe_share_group(a);
+    if (!a->share_verified) {
+        fprintf(stderr,"winvm: ANGLE could not share a complete framebuffer and GL sync\n");
+        goto fail;
+    }
     return true;
 fail:
     hv_npt_angle_close(a);

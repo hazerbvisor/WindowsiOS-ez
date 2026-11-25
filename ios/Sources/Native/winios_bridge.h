@@ -15,6 +15,7 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) NSUInteger mappedJITMiB;
 @property (nonatomic, readonly) BOOL guestShareAvailable;
 @property (nonatomic, readonly) BOOL metalGPULabActive;
+@property (nonatomic) BOOL scanoutCPUReadback;
 @property (nonatomic, readonly) BOOL isDebuggerAttached;
 @property (nonatomic, readonly) BOOL isVMRunning;
 @property (nonatomic, readonly) BOOL needsRelaunchToStart;

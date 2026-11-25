@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "fb_display.h"
+#include "fb_readback.h"
 
 static NSString *const kFbShaderSource =
     @"#include <metal_stdlib>\n"
@@ -53,11 +54,18 @@ static NSString *const kFbShaderSource =
     uint64_t lastHash;
     uint64_t lastScanoutSerial;
     BOOL lastNative;
+    BOOL lastReadback, readbackEnabled, readbackInFlight;
+    CFTimeInterval lastReadbackRequest;
+    id<MTLTexture> readbackSource, readbackTexture;
+    uint64_t readbackGeneration, readbackEpoch, readbackHash;
+    uint64_t readbackSamples, readbackBlack, readbackChanges, readbackErrors;
+    long readbackLastError;
     CGSize lastDrawableSize;
 }
 - (instancetype)initWithDisplay:(HvFbDisplay *)display;
 - (void)setTargetLayer:(CAMetalLayer *)newLayer;
 - (void)setPresentationRate:(unsigned)rate;
+- (void)setCPUReadback:(BOOL)enabled;
 - (void)tick;
 @end
 
@@ -141,6 +149,82 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
     return hash ? hash : 1;
 }
 
+- (void)setCPUReadback:(BOOL)enabled {
+    os_unfair_lock_lock(&lock);
+    if (readbackEnabled != enabled) {
+        readbackEnabled = enabled;
+        readbackEpoch++;
+        readbackSource = nil;
+        readbackTexture = nil;
+        lastReadbackRequest = 0;
+        lastNativeSubmit = 0;
+    }
+    os_unfair_lock_unlock(&lock);
+}
+
+/* Called with the presenter lock held. A completed blit makes the shared
+ * CPU buffer readable. It does not create a dependency on another queue. */
+- (void)requestReadback:(id<MTLTexture>)source {
+    size_t stride = 0;
+    size_t bytes = hv_fb_readback_layout((uint32_t)source.width, (uint32_t)source.height, &stride);
+    id<MTLBuffer> buffer = bytes ? [device newBufferWithLength:bytes options:MTLResourceStorageModeShared] : nil;
+    id<MTLCommandBuffer> cb = buffer ? [queue commandBuffer] : nil;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    if (!blit) {
+        readbackErrors++;
+        readbackLastError = -1;
+        return;
+    }
+    [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                sourceSize:MTLSizeMake(source.width,source.height,1) toBuffer:buffer destinationOffset:0
+       destinationBytesPerRow:stride destinationBytesPerImage:bytes];
+    [blit endEncoding];
+    readbackInFlight = YES;
+    uint64_t epoch = readbackEpoch;
+    __weak HvFbMetalPresenter *weakSelf = self;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+        HvFbMetalPresenter *p = weakSelf;
+        if (!p) return;
+        os_unfair_lock_lock(&p->lock);
+        p->readbackInFlight = NO;
+        pthread_mutex_lock(&p->fb->mu);
+        BOOL matching = p->fb->native_texture == (__bridge void *)source;
+        pthread_mutex_unlock(&p->fb->mu);
+        if (p->readbackEnabled && p->readbackEpoch == epoch && matching) {
+            if (finished.status == MTLCommandBufferStatusCompleted) {
+                BOOL newSource = p->readbackSource != source;
+                bool black;
+                uint64_t fingerprint = hv_fb_readback_measure(buffer.contents,(uint32_t)source.width,
+                                                             (uint32_t)source.height,stride,&black);
+                if (p->readbackSamples && !newSource && fingerprint != p->readbackHash) p->readbackChanges++;
+                p->readbackHash = fingerprint;
+                p->readbackSamples++;
+                p->readbackBlack += black;
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+                    width:source.width height:source.height mipmapped:NO];
+                td.storageMode = MTLStorageModeShared;
+                td.usage = MTLTextureUsageShaderRead;
+                id<MTLTexture> snapshot = [p->device newTextureWithDescriptor:td];
+                if (snapshot) {
+                    [snapshot replaceRegion:MTLRegionMake2D(0,0,source.width,source.height) mipmapLevel:0
+                                   withBytes:buffer.contents bytesPerRow:stride];
+                    p->readbackSource = source;
+                    p->readbackTexture = snapshot;
+                    p->readbackGeneration++;
+                } else {
+                    p->readbackErrors++;
+                    p->readbackLastError = -2;
+                }
+            } else {
+                p->readbackErrors++;
+                p->readbackLastError = finished.error.code;
+            }
+        }
+        os_unfair_lock_unlock(&p->lock);
+    }];
+    [cb commit];
+}
+
 - (void)tick {
     @autoreleasepool {
         const uint8_t *px = NULL;
@@ -171,6 +255,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         }
         pthread_mutex_unlock(&fb->mu);
         BOOL usingNative=native!=nil;
+        BOOL usingReadback=usingNative && readbackEnabled;
         BOOL sizeChanged = !CGSizeEqualToSize(dsize, lastDrawableSize);
         uint64_t hval=0;
         id<MTLTexture> sampleTexture=nil;
@@ -182,19 +267,33 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
                 atomic_fetch_add_explicit(&invalidTextures,1,memory_order_relaxed);
                 os_unfair_lock_unlock(&lock); return;
             }
-            /* A native texture can be updated in place without a new
-             * RESOURCE_FLUSH. Re-sample at most every 33ms when unchanged;
-             * preserve the normal serial-based path for explicit updates. */
-            CFTimeInterval now=CACurrentMediaTime();
-            if (lastNative && scanoutSerial==lastScanoutSerial && !sizeChanged &&
-                now-lastNativeSubmit<1.0/30.0) {
-                os_unfair_lock_unlock(&lock); return;
+            if (usingReadback) {
+                CFTimeInterval now = CACurrentMediaTime();
+                if (!readbackInFlight && now-lastReadbackRequest>=0.25) {
+                    lastReadbackRequest = now;
+                    [self requestReadback:native];
+                }
+                if (readbackSource != native || !readbackTexture ||
+                    (lastReadback && lastScanoutSerial==readbackGeneration && !sizeChanged)) {
+                    os_unfair_lock_unlock(&lock); return;
+                }
+                scanoutSerial = readbackGeneration;
+                sampleTexture = readbackTexture;
+            } else {
+                /* The producer can modify a native texture without a new flush. */
+                CFTimeInterval now=CACurrentMediaTime();
+                if (lastNative && !lastReadback && scanoutSerial==lastScanoutSerial && !sizeChanged &&
+                    now-lastNativeSubmit<1.0/30.0) {
+                    os_unfair_lock_unlock(&lock); return;
+                }
+                sampleTexture=native;
             }
             if (atomic_load_explicit(&inFlight,memory_order_relaxed)>=2) {
                 os_unfair_lock_unlock(&lock); return;
             }
-            sampleTexture=native;
         } else {
+            readbackSource=nil;
+            readbackTexture=nil;
             if (hv_fb_display_acquire_frame(fb,&px,&w,&h,&stride,&scanoutSerial)!=0) {
                 os_unfair_lock_unlock(&lock); return;
             }
@@ -276,6 +375,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         [cb commit];
 
         lastNative = usingNative;
+        lastReadback = usingReadback;
         lastHash = hval;
         lastScanoutSerial = scanoutSerial;
         lastDrawableSize = dsize;
@@ -308,6 +408,10 @@ void hv_fb_metal_set_rate(HvFbDisplay *fb, unsigned fps) {
     if (fps >= 1 && fps <= 120) [ensure_presenter(fb) setPresentationRate:fps];
 }
 
+void hv_fb_metal_set_cpu_readback(HvFbDisplay *fb, bool enabled) {
+    if (fb) [ensure_presenter(fb) setCPUReadback:enabled];
+}
+
 uint64_t hv_fb_metal_frames(HvFbDisplay *fb) {
     if (!fb || !fb->metal) return 0;
     HvFbMetalPresenter *p = (__bridge HvFbMetalPresenter *)fb->metal;
@@ -319,7 +423,7 @@ void hv_fb_metal_diagnostics(HvFbDisplay *fb,char *buffer,size_t capacity) {
     *buffer=0;
     if (!fb || !fb->metal) return;
     HvFbMetalPresenter *p=(__bridge HvFbMetalPresenter *)fb->metal;
-    snprintf(buffer,capacity,"metal_presenter: submitted=%llu completed=%llu presented=%llu errors=%llu invalid_texture=%llu no_drawable=%llu inflight=%u last_error=%ld\n",
+    int used=snprintf(buffer,capacity,"metal_presenter: submitted=%llu completed=%llu presented=%llu errors=%llu invalid_texture=%llu no_drawable=%llu inflight=%u last_error=%ld\n",
         (unsigned long long)atomic_load_explicit(&p->framesSubmitted,memory_order_relaxed),
         (unsigned long long)atomic_load_explicit(&p->framesCompleted,memory_order_relaxed),
         (unsigned long long)atomic_load_explicit(&p->framesPresented,memory_order_relaxed),
@@ -328,6 +432,14 @@ void hv_fb_metal_diagnostics(HvFbDisplay *fb,char *buffer,size_t capacity) {
         (unsigned long long)atomic_load_explicit(&p->unavailableDrawables,memory_order_relaxed),
         atomic_load_explicit(&p->inFlight,memory_order_relaxed),
         atomic_load_explicit(&p->lastCommandError,memory_order_relaxed));
+    if (used < 0 || (size_t)used >= capacity) return;
+    os_unfair_lock_lock(&p->lock);
+    snprintf(buffer+used,capacity-(size_t)used,
+             "cpu_readback: enabled=%u pending=%u samples=%llu black=%llu changed=%llu errors=%llu last_error=%ld\n",
+             (unsigned)p->readbackEnabled,(unsigned)p->readbackInFlight,(unsigned long long)p->readbackSamples,
+             (unsigned long long)p->readbackBlack,(unsigned long long)p->readbackChanges,
+             (unsigned long long)p->readbackErrors,p->readbackLastError);
+    os_unfair_lock_unlock(&p->lock);
 }
 
 int hv_fb_save_png(HvFbDisplay *fb, const char *path) {

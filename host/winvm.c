@@ -143,6 +143,11 @@ void hv_winvm_set_presentation_rate(unsigned fps) {
     if (fb) hv_fb_metal_set_rate(fb, fps);
 }
 
+void hv_winvm_set_cpu_readback(int enabled) {
+    HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
+    if (fb) hv_fb_metal_set_cpu_readback(fb,enabled!=0);
+}
+
 int hv_winvm_display_size(uint32_t *w, uint32_t *h) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     if (!fb) return -1;

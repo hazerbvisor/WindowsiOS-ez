@@ -1,7 +1,7 @@
-name: MetalGPU native presentation IPA
+name: MetalGPU context-sharing and readback IPA
 on:
   push:
-    branches: [build/metalgpu-present-fix]
+    branches: [fix/metalgpu-black-screen]
     paths: [.github/workflows/one-off-metalgpu.yml]
 permissions:
   contents: read
@@ -63,12 +63,17 @@ jobs:
           python3 -m unittest discover -s tests -p test_virtio_gpu.py
           cc -std=c11 -Wall -Wextra -Werror tests/test_gpu_modes.c -o "$RUNNER_TEMP/gpu-modes"
           "$RUNNER_TEMP/gpu-modes"
+          cc -std=c11 -Wall -Wextra -Werror tests/test_fb_readback.c -o "$RUNNER_TEMP/fb-readback"
+          "$RUNNER_TEMP/fb-readback"
+          cc -std=c11 -Wall -Wextra -Werror -I"$WINIOS_GPU_PREBUILT_PREFIX/include" \
+            tests/test_neptune_angle.c devices/neptune_angle.c -o "$RUNNER_TEMP/neptune-angle"
+          "$RUNNER_TEMP/neptune-angle"
       - name: Compile WindowsiOS and package precompiled GPU frameworks
         run: bash scripts/build_unsigned_ipa.sh
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-PresentFix-unsigned
+          name: WindowsiOS-ez-MetalGPU-Readback-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7

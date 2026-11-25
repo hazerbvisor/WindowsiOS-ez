@@ -77,7 +77,7 @@ struct HvVirtioGpu {
     Cursor cursor;
     size_t allocated;
     bool pending[QUEUES];
-    uint64_t completed[QUEUES], malformed, command_errors, publishes, resets;
+    uint64_t completed[QUEUES], malformed, command_errors, publishes, resets, edid_compat;
     struct { uint32_t opcode, response, flags, context, length; uint64_t count; } errors[16];
 #ifdef WINIOS_ENABLE_NEPTUNE
     HvNeptune *neptune;
@@ -86,7 +86,7 @@ struct HvVirtioGpu {
     void *native_texture;
     uint32_t native_resource, native_width, native_height;
     NeptuneReply deferred[HV_NPT_MAX_FENCES];
-    uint64_t neptune_submits, neptune_completed;
+    uint64_t neptune_submits, neptune_completed, neptune_fence_errors;
 #endif
 };
 
@@ -364,14 +364,21 @@ static uint32_t control(HvVirtioGpu *gpu, const HvVirtqElem *elem) {
         reply.hdr.type = OK_DISPLAY_INFO;
         bytes = sizeof(DisplayInfo);
         break;
-    case GET_EDID:
-        if (got < 8 || !(gpu->vio.driver_features & EDID_FEATURE) || writable < sizeof(EdidReply)) break;
+    case GET_EDID: {
+        bool neptune=false;
+#ifdef WINIOS_ENABLE_NEPTUNE
+        neptune=gpu->neptune!=NULL;
+#endif
+        if (got < 8 || writable < sizeof(EdidReply) ||
+            !hv_gpu_edid_available(gpu->vio.features,gpu->vio.driver_features,neptune)) break;
         if (body[0]) { reply.hdr.type = ERR_SCANOUT; break; }
         reply.hdr.type = OK_EDID;
         reply.edid.size = 128;
         hv_gpu_mode_edid(reply.edid.data);
         bytes = sizeof(EdidReply);
+        if (!(gpu->vio.driver_features & EDID_FEATURE)) gpu->edid_compat++;
         break;
+    }
     case RESOURCE_CREATE_2D:
         if (got >= 16) reply.hdr.type = create_2d(gpu, body[0], body[1], body[2], body[3]);
         break;
@@ -695,6 +702,7 @@ static void neptune_retire(HvVirtioGpu *gpu) {
             memcpy(p->response,&response,sizeof(response));
             Header failed=response; failed.type=p->opcode;
             record_error(gpu,&failed,ERR_UNSPEC,0);
+            gpu->neptune_fence_errors++;
         }
         uint32_t written=hv_virtq_write(&gpu->vio,&p->elem,0,p->response,p->bytes);
         hv_virtq_push(&gpu->vio,0,&p->elem,written);
@@ -889,7 +897,8 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
              " scanout=%ux%u host_cpu_bytes=%zu resources=%u\n"
              "graphics_queues: control_completed=%" PRIu64 " cursor_completed=%" PRIu64
              " control_pending=%u cursor_pending=%u malformed=%" PRIu64
-             " command_errors=%" PRIu64 " scanout_updates=%" PRIu64 " resets=%" PRIu64 "\n",
+             " command_errors=%" PRIu64 " scanout_updates=%" PRIu64 " resets=%" PRIu64 "\n"
+             "edid: offered=%u negotiated=%u compat_served=%" PRIu64 "\n",
              
 #ifdef WINIOS_ENABLE_NEPTUNE
              gpu->neptune ? "Neptune-LAB" : "VirtIO-GPU-2D",
@@ -899,13 +908,15 @@ void hv_virtio_gpu_diagnostics(const HvVirtioGpu *gpu, char *buffer, size_t capa
              display, (unsigned)gpu->vio.status, gpu->vio.driver_features,
              width, height, gpu->allocated + 2 * frame, resources,
              gpu->completed[0], gpu->completed[1], (unsigned)gpu->pending[0], (unsigned)gpu->pending[1],
-             gpu->malformed, gpu->command_errors, gpu->publishes, gpu->resets);
+             gpu->malformed, gpu->command_errors, gpu->publishes, gpu->resets,
+             (unsigned)((gpu->vio.features & EDID_FEATURE)!=0),
+             (unsigned)((gpu->vio.driver_features & EDID_FEATURE)!=0),gpu->edid_compat);
     size_t used=strlen(buffer);
 #ifdef WINIOS_ENABLE_NEPTUNE
     if (gpu->neptune && used<capacity) {
         uint64_t bytes=0; unsigned count=hv_neptune_resource_count(gpu->neptune,&bytes);
-        int n=snprintf(buffer+used,capacity-used,"neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 "\n",
-            count,bytes,gpu->neptune_submits,gpu->neptune_completed);
+        int n=snprintf(buffer+used,capacity-used,"neptune: resources=%u bytes=%" PRIu64 " fenced=%" PRIu64 " retired=%" PRIu64 " reply_errors=%" PRIu64 "\n",
+            count,bytes,gpu->neptune_submits,gpu->neptune_completed,gpu->neptune_fence_errors);
         if (n>0) used+=(size_t)n;
         if (used<capacity) {
             hv_neptune_context_diagnostics(gpu->neptune,buffer+used,capacity-used);

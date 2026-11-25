@@ -109,7 +109,9 @@ static void old_fence(void *cookie,uint32_t fence) {
 static void *egl_display(void *cookie) { return ((HvNeptune *)cookie)->angle.display; }
 static virgl_renderer_gl_context create_gl(void *cookie,int scanout,struct virgl_renderer_gl_ctx_param *p) {
     (void)scanout;
-    return hv_npt_angle_context(&((HvNeptune *)cookie)->angle,p->major_ver,p->minor_ver,p->shared);
+    /* vrend's ctx0 owns objects used by the other contexts and polls their
+     * GL syncs. Its shared=false flag requests our root, not an isolated group. */
+    return hv_npt_angle_context(&((HvNeptune *)cookie)->angle,p->major_ver,p->minor_ver);
 }
 static void destroy_gl(void *cookie,virgl_renderer_gl_context context) {
     HvNptAngle *a=&((HvNeptune *)cookie)->angle;
@@ -456,9 +458,10 @@ void hv_neptune_context_diagnostics(HvNeptune *n,char *buffer,size_t capacity) {
     if (!n) { *buffer=0; return; }
     unsigned live=0;
     for (size_t i=0;i<HV_NPT_MAX_CONTEXTS;++i) live+=n->contexts[i]!=0;
-    int len=snprintf(buffer,capacity,"neptune_contexts: live=%u attempts=%" PRIu64 " success=%" PRIu64 " fail=%" PRIu64 " destroyed=%" PRIu64 " missing_destroy=%" PRIu64 " last_id=%u last_cap=%u last_rc=%d container_shmem=%u\n",
+    int len=snprintf(buffer,capacity,"neptune_contexts: live=%u attempts=%" PRIu64 " success=%" PRIu64 " fail=%" PRIu64 " destroyed=%" PRIu64 " missing_destroy=%" PRIu64 " last_id=%u last_cap=%u last_rc=%d container_shmem=%u angle_share_verified=%u\n",
         live,n->ctx_attempts,n->ctx_success,n->ctx_fail,n->ctx_destroy,n->ctx_missing_destroy,
-        n->last_ctx_id,n->last_ctx_cap,n->last_ctx_rc,getenv("WINIOS_NEPTUNE_SHM_DIR")?1u:0u);
+        n->last_ctx_id,n->last_ctx_cap,n->last_ctx_rc,getenv("WINIOS_NEPTUNE_SHM_DIR")?1u:0u,
+        (unsigned)n->angle.share_verified);
     if (len<0) return;
     size_t used=(size_t)len;
     pthread_mutex_lock(&renderer_log_lock);

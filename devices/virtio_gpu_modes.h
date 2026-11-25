@@ -42,4 +42,10 @@ static inline void hv_gpu_mode_edid(uint8_t data[1024]) {
     for (unsigned pos=90;pos<=108;pos+=18) data[pos+3]=0x10;
     for (unsigned i=0;i<127;++i) data[127]-=data[i];
 }
+/* The pinned WDDM 3D driver requests EDID when advertised, even if it did
+ * not acknowledge the bit. The upstream QEMU command accepts that request. */
+static inline int hv_gpu_edid_available(uint64_t offered, uint64_t accepted, int neptune) {
+    const uint64_t bit = 1u << 1;
+    return (offered & bit) && ((accepted & bit) || neptune);
+}
 #endif
