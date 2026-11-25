@@ -8,6 +8,7 @@
 #include <os/lock.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "fb_display.h"
@@ -45,7 +46,10 @@ static NSString *const kFbShaderSource =
     uint32_t texW, texH;
     dispatch_source_t timer;
     unsigned fps;
-    _Atomic(uint64_t) framesPresented;
+    _Atomic(uint64_t) framesPresented, framesSubmitted, framesCompleted, commandErrors, invalidTextures, unavailableDrawables;
+    _Atomic(unsigned) inFlight;
+    _Atomic(long) lastCommandError;
+    CFTimeInterval lastNativeSubmit;
     uint64_t lastHash;
     uint64_t lastScanoutSerial;
     BOOL lastNative;
@@ -87,6 +91,7 @@ static NSString *const kFbShaderSource =
     lastHash = 0;
     lastScanoutSerial = 0;
     lastDrawableSize = CGSizeZero;
+    lastNativeSubmit = 0;
     if (layer && device) {
         dispatch_block_t cfg = ^{
             newLayer.device = self->device;
@@ -174,9 +179,18 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
                 native.textureType!=MTLTextureType2D || native.sampleCount!=1 ||
                 (native.pixelFormat!=MTLPixelFormatBGRA8Unorm && native.pixelFormat!=MTLPixelFormatRGBA8Unorm &&
                  native.pixelFormat!=MTLPixelFormatBGRA8Unorm_sRGB && native.pixelFormat!=MTLPixelFormatRGBA8Unorm_sRGB)) {
+                atomic_fetch_add_explicit(&invalidTextures,1,memory_order_relaxed);
                 os_unfair_lock_unlock(&lock); return;
             }
-            if (lastNative && scanoutSerial==lastScanoutSerial && !sizeChanged) {
+            /* A native texture can be updated in place without a new
+             * RESOURCE_FLUSH. Re-sample at most every 33ms when unchanged;
+             * preserve the normal serial-based path for explicit updates. */
+            CFTimeInterval now=CACurrentMediaTime();
+            if (lastNative && scanoutSerial==lastScanoutSerial && !sizeChanged &&
+                now-lastNativeSubmit<1.0/30.0) {
+                os_unfair_lock_unlock(&lock); return;
+            }
+            if (atomic_load_explicit(&inFlight,memory_order_relaxed)>=2) {
                 os_unfair_lock_unlock(&lock); return;
             }
             sampleTexture=native;
@@ -208,6 +222,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
 
         id<CAMetalDrawable> drawable = [curLayer nextDrawable];
         if (!drawable) {
+            atomic_fetch_add_explicit(&unavailableDrawables,1,memory_order_relaxed);
             os_unfair_lock_unlock(&lock);
             return;
         }
@@ -229,11 +244,34 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
 
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        if (!cb || !enc) {
+            atomic_fetch_add_explicit(&commandErrors,1,memory_order_relaxed);
+            os_unfair_lock_unlock(&lock); return;
+        }
         [enc setRenderPipelineState:pipeline];
         [enc setVertexBytes:scale length:sizeof(scale) atIndex:0];
         [enc setFragmentTexture:sampleTexture atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         [enc endEncoding];
+        __weak HvFbMetalPresenter *weakSelf=self;
+        atomic_fetch_add_explicit(&inFlight,1,memory_order_relaxed);
+        atomic_fetch_add_explicit(&framesSubmitted,1,memory_order_relaxed);
+        [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+            (void)presented;
+            HvFbMetalPresenter *p=weakSelf;
+            if (p) atomic_fetch_add_explicit(&p->framesPresented,1,memory_order_relaxed);
+        }];
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+            HvFbMetalPresenter *p=weakSelf;
+            if (!p) return;
+            if (finished.status==MTLCommandBufferStatusCompleted)
+                atomic_fetch_add_explicit(&p->framesCompleted,1,memory_order_relaxed);
+            else {
+                atomic_fetch_add_explicit(&p->commandErrors,1,memory_order_relaxed);
+                atomic_store_explicit(&p->lastCommandError,(long)finished.error.code,memory_order_relaxed);
+            }
+            atomic_fetch_sub_explicit(&p->inFlight,1,memory_order_relaxed);
+        }];
         [cb presentDrawable:drawable];
         [cb commit];
 
@@ -241,7 +279,7 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
         lastHash = hval;
         lastScanoutSerial = scanoutSerial;
         lastDrawableSize = dsize;
-        atomic_fetch_add_explicit(&framesPresented, 1, memory_order_relaxed);
+        if (usingNative) lastNativeSubmit=CACurrentMediaTime();
         os_unfair_lock_unlock(&lock);
     }
 }
@@ -274,6 +312,22 @@ uint64_t hv_fb_metal_frames(HvFbDisplay *fb) {
     if (!fb || !fb->metal) return 0;
     HvFbMetalPresenter *p = (__bridge HvFbMetalPresenter *)fb->metal;
     return atomic_load_explicit(&p->framesPresented, memory_order_relaxed);
+}
+
+void hv_fb_metal_diagnostics(HvFbDisplay *fb,char *buffer,size_t capacity) {
+    if (!capacity) return;
+    *buffer=0;
+    if (!fb || !fb->metal) return;
+    HvFbMetalPresenter *p=(__bridge HvFbMetalPresenter *)fb->metal;
+    snprintf(buffer,capacity,"metal_presenter: submitted=%llu completed=%llu presented=%llu errors=%llu invalid_texture=%llu no_drawable=%llu inflight=%u last_error=%ld\n",
+        (unsigned long long)atomic_load_explicit(&p->framesSubmitted,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&p->framesCompleted,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&p->framesPresented,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&p->commandErrors,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&p->invalidTextures,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&p->unavailableDrawables,memory_order_relaxed),
+        atomic_load_explicit(&p->inFlight,memory_order_relaxed),
+        atomic_load_explicit(&p->lastCommandError,memory_order_relaxed));
 }
 
 int hv_fb_save_png(HvFbDisplay *fb, const char *path) {

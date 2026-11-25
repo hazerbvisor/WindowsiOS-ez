@@ -52,3 +52,28 @@ s=s.replace(anchor, """   /* WindowsiOS-ez supplies its own app-container tempor
 """ + anchor)
 s=s.replace("#include <stdlib.h>","#include <stdlib.h>\n#include <stdint.h>",1)
 p.write_text(s)
+
+
+# Keep all VirGL contexts on the same stable share group in the external
+# ANGLE winsys. The app already owns the current EGL root at external init.
+# Do not rely on whatever context happens to be current during a later
+# subcontext or synchronization-context creation.
+p=pathlib.Path(sys.argv[1])/"src/vrend/vrend_winsys_egl.c"
+s=p.read_text()
+anchor="   EGLContext egl_ctx;"
+assert s.count(anchor)>=1
+s=s.replace(anchor,anchor+"\n   EGLContext external_share_root;",1)
+anchor="   egl->egl_display = egl_display;"
+assert s.count(anchor)==1
+s=s.replace(anchor,anchor+"""
+   if (getenv("WINIOS_NEPTUNE_SHM_DIR")) {
+      egl->external_share_root = eglGetCurrentContext();
+      if (egl->external_share_root == EGL_NO_CONTEXT ||
+          eglGetCurrentDisplay() != egl_display)
+         goto fail;
+   }
+""",1)
+anchor="vparams->shared ? eglGetCurrentContext() : EGL_NO_CONTEXT,"
+assert s.count(anchor)==1
+s=s.replace(anchor,"egl->external_share_root ? egl->external_share_root :\n                             (vparams->shared ? eglGetCurrentContext() : EGL_NO_CONTEXT),")
+p.write_text(s)

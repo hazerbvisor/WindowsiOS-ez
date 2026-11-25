@@ -356,6 +356,8 @@ void hv_winvm_graphics_diagnostics(char *buffer, size_t capacity) {
     hv_dev_lock(&m);
     if (*stopped_graphics) snprintf(buffer, capacity, "graphics_last_session:\n%s", stopped_graphics);
     else hv_virtio_gpu_diagnostics(board.gpu, buffer, capacity);
+    size_t used=strlen(buffer);
+    if (used<capacity) hv_fb_metal_diagnostics(board.fb,buffer+used,capacity-used);
     hv_dev_unlock(&m);
 }
 

@@ -700,6 +700,10 @@ static void neptune_retire(HvVirtioGpu *gpu) {
         hv_virtq_push(&gpu->vio,0,&p->elem,written);
         gpu->completed[0]++;
         gpu->neptune_completed++;
+        /* A GPU completion can change the current native texture in place.
+         * Re-sample after retirement even without a separate FLUSH. */
+        if (result>0 && response.type==OK_NODATA && gpu->native_texture)
+            hv_fb_display_native_dirty(gpu->fb);
         *p=(NeptuneReply){0};
         interrupt=true;
     }

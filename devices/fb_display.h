@@ -51,6 +51,7 @@ void hv_fb_display_set_scanout(HvFbDisplay *fb, uint8_t *pixels, uint32_t w, uin
 void hv_fb_metal_set_layer(HvFbDisplay *fb, void *ca_metal_layer);
 void hv_fb_metal_set_rate(HvFbDisplay *fb, unsigned fps);
 uint64_t hv_fb_metal_frames(HvFbDisplay *fb);
+void hv_fb_metal_diagnostics(HvFbDisplay *fb,char *buffer,size_t capacity);
 int hv_fb_save_png(HvFbDisplay *fb, const char *path);
 
 #endif

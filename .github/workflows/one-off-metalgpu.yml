@@ -1,7 +1,7 @@
-name: MetalGPU container shared-memory IPA (complete generator environment)
+name: MetalGPU native presentation IPA
 on:
   push:
-    branches: [build/metalgpu-shmem-fix]
+    branches: [build/metalgpu-present-fix]
     paths: [.github/workflows/one-off-metalgpu.yml]
 permissions:
   contents: read
@@ -68,7 +68,7 @@ jobs:
       - name: Upload verified lab IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: WindowsiOS-ez-MetalGPU-ShmemFix-unsigned
+          name: WindowsiOS-ez-MetalGPU-PresentFix-unsigned
           path: build/artifacts/metalgpu-lab/
           if-no-files-found: error
           retention-days: 7
