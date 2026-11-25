@@ -1,0 +1,69 @@
+workflows:
+  winpvg-lab:
+    name: WinPVG Lab - unsigned iPad IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: latest
+      vars:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/work/winpvg-llvm/install-iphoneos-arm64
+    scripts:
+      - name: Prepare Apple Silicon toolchain
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --find metal
+          for formula in cmake ninja meson pkgconf bison flex vulkan-headers spirv-headers vulkan-loader; do
+            brew list --versions "$formula" >/dev/null || brew install "$formula"
+          done
+          mkdir -p work/winpvg-ci
+      - name: Validate portable WinPVG protocol
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          xcrun clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            tests/test_wpvg_lab.c -o work/winpvg-ci/test_wpvg_lab
+          work/winpvg-ci/test_wpvg_lab 2>&1 | tee work/winpvg-ci/protocol.log
+      - name: Generate real Direct3D 11 DXBC test shaders
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          bash scripts/build_winpvg_macos_fixtures.sh 2>&1 | tee work/winpvg-ci/fixtures.log
+      - name: Build or reuse ARM64 iPhoneOS LLVM 15.0.7
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          prefix="$CM_BUILD_DIR/work/winpvg-llvm/install-iphoneos-arm64"
+          key="$(git hash-object scripts/build_winpvg_ios_llvm.sh)-$(xcodebuild -version | tr '\n' '-')-$(xcrun --sdk iphoneos --show-sdk-version)"
+          if [[ -s "$prefix/lib/libLLVMCore.a" && -f "$prefix/.winpvg-cache-key" ]] && [[ "$(cat "$prefix/.winpvg-cache-key")" == "$key" ]]; then
+            echo "Reusing matching cached LLVM prefix"
+          else
+            rm -rf "$prefix"
+            bash scripts/build_winpvg_ios_llvm.sh 2>&1 | tee work/winpvg-ci/llvm.log
+            printf '%s\n' "$key" > "$prefix/.winpvg-cache-key"
+          fi
+      - name: Build and package native iPad lab
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          export WPVG_IOS_LLVM_PREFIX="$CM_BUILD_DIR/work/winpvg-llvm/install-iphoneos-arm64"
+          export WPVG_FIXTURES="$CM_BUILD_DIR/work/winpvg-fixtures"
+          bash scripts/build_winpvg_ios_lab.sh 2>&1 | tee work/winpvg-ci/ipa.log
+          test -s work/winpvg-ios/WinPVGLab-unsigned.ipa
+          shasum -a 256 work/winpvg-ios/WinPVGLab-unsigned.ipa > work/winpvg-ci/IPA-SHA256.txt
+          unzip -t work/winpvg-ios/WinPVGLab-unsigned.ipa
+    artifacts:
+      - work/winpvg-ios/WinPVGLab-unsigned.ipa
+      - work/winpvg-ci/*.log
+      - work/winpvg-ci/IPA-SHA256.txt
+      - work/winpvg-fixtures/*.cso
+      - work/winpvg-fixtures/SHA256SUMS
+      - work/winpvg-fixtures/compiler.txt
+      - work/winpvg-ios/dxmt.*/build/meson-logs/meson-log.txt
