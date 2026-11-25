@@ -1,0 +1,67 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Host-only shader fixture generator; vkd3d is NOT linked into the iOS app.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$ROOT/work/winpvg-fixtures"
+mkdir -p "$OUT"
+if [[ -n "${WPVG_VKD3D_COMPILER:-}" ]]; then
+    COMPILER="$WPVG_VKD3D_COMPILER"
+elif command -v vkd3d-compiler >/dev/null; then
+    COMPILER="$(command -v vkd3d-compiler)"
+else
+    VERSION=1.17
+    WORK="$ROOT/work/winpvg-vkd3d"
+    mkdir -p "$WORK"
+    curl --fail --location --retry 3 \
+        "https://dl.winehq.org/vkd3d/source/vkd3d-$VERSION.tar.xz" \
+        -o "$WORK/vkd3d.tar.xz"
+    shasum -a 256 "$WORK/vkd3d.tar.xz"
+    tar -xJf "$WORK/vkd3d.tar.xz" -C "$WORK"
+    SRC="$WORK/vkd3d-$VERSION"
+    (
+        cd "$SRC"
+        export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+        export CPPFLAGS="-I$(brew --prefix vulkan-headers)/include -I$(brew --prefix spirv-headers)/include"
+        export LDFLAGS="-L$(brew --prefix vulkan-loader)/lib"
+        ./configure --disable-tests --disable-demos --without-ncurses --without-xcb --without-spirv-tools
+        make -j "$(sysctl -n hw.ncpu)" vkd3d-compiler
+    )
+    COMPILER="$SRC/vkd3d-compiler"
+fi
+"$COMPILER" --version | tee "$OUT/compiler.txt"
+HLSL="$ROOT/tests/shaders/wpvg_d3d11.hlsl"
+"$COMPILER" -x hlsl -b dxbc-tpf -p vs_5_0 -e vs_main -o "$OUT/vertex.cso" "$HLSL"
+"$COMPILER" -x hlsl -b dxbc-tpf -p ps_5_0 -e ps_red -o "$OUT/red.cso" "$HLSL"
+"$COMPILER" -x hlsl -b dxbc-tpf -p ps_5_0 -e ps_green -o "$OUT/green.cso" "$HLSL"
+python3 - "$OUT" <<'PY'
+import pathlib, struct, sys
+root = pathlib.Path(sys.argv[1])
+for name, stage in [('vertex', 1), ('red', 0), ('green', 0)]:
+    data = (root / (name + '.cso')).read_bytes()
+    if len(data) < 32 or data[:4] != b'DXBC':
+        raise SystemExit(f'{name}: expected DXBC container')
+    size, count = struct.unpack_from('<II', data, 24)
+    if size != len(data) or not 0 < count <= 64 or 32 + 4*count > size:
+        raise SystemExit(f'{name}: malformed DXBC header')
+    programs = []
+    for i in range(count):
+        off, = struct.unpack_from('<I', data, 32 + i*4)
+        if off < 32 + 4*count or off + 8 > size:
+            raise SystemExit(f'{name}: invalid chunk offset')
+        tag, length = struct.unpack_from('<4sI', data, off)
+        if off + 8 + length > size or tag == b'DXIL':
+            raise SystemExit(f'{name}: invalid chunk or DXIL')
+        if tag in (b'SHDR', b'SHEX'):
+            if length < 8 or length % 4:
+                raise SystemExit(f'{name}: malformed shader chunk')
+            version, words = struct.unpack_from('<II', data, off+8)
+            if version != (stage << 16) | 0x50 or words*4 != length:
+                raise SystemExit(f'{name}: wrong shader model or stage')
+            programs.append(tag)
+    if len(programs) != 1:
+        raise SystemExit(f'{name}: expected one tokenized shader')
+if (root/'red.cso').read_bytes() == (root/'green.cso').read_bytes():
+    raise SystemExit('Pixel shader fixtures unexpectedly identical')
+PY
+(cd "$OUT"; shasum -a 256 vertex.cso red.cso green.cso > SHA256SUMS)
