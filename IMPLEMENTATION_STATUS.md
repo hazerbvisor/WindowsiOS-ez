@@ -49,3 +49,5 @@ Added `scripts/package_dxmt_smoke.sh` to package the pinned native offscreen DXM
 
 ### Native Neptune host adapter
 Implemented host-side pinned renderer initialization (DXMT only), context/capset/submit, host3D blob lifecycle, bounded scalar mapping, exact fence tickets and a separate native renderer build entry point. The adapter is not wired to guest virtqueues or packaged in the IPA; guest normal-memory BAR mappings, async virtqueue completion and native scanout remain blockers. No Xcode compilation or device results are claimed.
+
+Staged VirtIO command decoding now connects copied command buffers to the native backend API, including capset query, contexts, HOST3D blob operations and per-context submit fences. It returns a host ticket for deferred completion and does not publish guest used rings. Management commands with context-timeline fences, guest-backed blobs, normal-memory BAR mappings, Metal scanout and queue integration remain unsupported. No 3D capability is exposed.

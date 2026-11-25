@@ -70,4 +70,6 @@ test -f "$HDR/virglrenderer.h"
 "$CC" -target arm64-apple-ios17.0 -isysroot "$SDK" -std=c11 -D_DARWIN_C_SOURCE \
     -DWINIOS_ENABLE_NEPTUNE -Wall -Wextra -Werror -I"$HDR" \
     -c "$ROOT/devices/neptune_backend.c" -o "$WORK/neptune_backend.o"
-echo "Native renderer and WindowsiOS adapter compiled. No guest capabilities enabled."
+"$CC" -target arm64-apple-ios17.0 -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror \
+    -c "$ROOT/devices/neptune_wire.c" -o "$WORK/neptune_wire.o"
+echo "Native renderer, WindowsiOS adapter and staged VirtIO decoder compiled. No guest capabilities enabled."
