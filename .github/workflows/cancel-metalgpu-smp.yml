@@ -1,0 +1,21 @@
+name: Cancel experimental MetalGPU SMP build
+on:
+  push:
+    branches: [build/metalgpu-smp]
+    paths: [.github/workflows/cancel-metalgpu-smp.yml]
+permissions:
+  actions: write
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Cancel requested run only
+        run: |
+          set -euo pipefail
+          status="$(gh api repos/$GITHUB_REPOSITORY/actions/runs/45621395057 --jq .status)"
+          if [ "$status" != completed ]; then
+            gh api --method POST repos/$GITHUB_REPOSITORY/actions/runs/45621395057/cancel
+          fi
