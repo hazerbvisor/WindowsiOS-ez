@@ -1,4 +1,4 @@
-name: MetalGPU container shared-memory IPA (ObjC toolchain)
+name: MetalGPU container shared-memory IPA (complete generator environment)
 on:
   push:
     branches: [build/metalgpu-shmem-fix]
@@ -26,6 +26,13 @@ jobs:
           for formula in xcodegen meson ninja pkgconf autoconf automake libtool; do
             if ! brew list --versions "$formula" >/dev/null; then brew install "$formula"; fi
           done
+      - name: Prepare isolated renderer Python generators
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/neptune-venv"
+          "$RUNNER_TEMP/neptune-venv/bin/python" -m pip install --disable-pip-version-check meson==1.10.0 PyYAML==6.0.3 Mako==1.3.10 six==1.17.0 pyparsing==3.2.5 setuptools==80.9.0 distlib==0.4.0
+          "$RUNNER_TEMP/neptune-venv/bin/python" -c 'import yaml, mako, six, pyparsing, setuptools, distlib, mesonbuild'
+          echo "$RUNNER_TEMP/neptune-venv/bin" >> "$GITHUB_PATH"
       - name: Download and verify pinned official UTM iOS ARM64 sysroot
         env:
           GH_TOKEN: ${{ github.token }}

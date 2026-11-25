@@ -45,14 +45,18 @@ objcpp = '$CXX'
 ar = '$AR'
 strip = '$STRIP'
 pkg-config = '$(command -v pkg-config)'
+python = '$(command -v python3)'
 [host_machine]
 system = 'darwin'
 subsystem = 'ios'
+kernel = 'xnu'
 cpu_family = 'aarch64'
 cpu = 'arm64'
 endian = 'little'
 [properties]
 needs_exe_wrapper = true
+has_function_pipe2 = false
+has_function_dup3 = false
 pkg_config_libdir = ['$DEPS/lib/pkgconfig','$DEPS/share/pkgconfig']
 [built-in options]
 c_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-I$DEPS/include']
@@ -64,6 +68,7 @@ cpp_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib
 objc_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
 objcpp_link_args = ['-target','arm64-apple-ios17.0','-isysroot','$SDK','-L$DEPS/lib']
 EOF
+python3 -c 'import yaml, mako, six, pyparsing'
 BUILD="$WORK/build"
 OPTIONS=(-Dneptune=true -Dvenus=false -Dcheck-gl-errors=false -Dvulkan-dload=false -Drender-server-mode=thread -Drender-server-worker=thread -Dplatforms=egl -Dunstable-apis=true -Dvtest=false -Dtests=false -Dvideo=false -Ddefault_library=shared)
 if [[ -d "$BUILD/meson-private" ]]; then
