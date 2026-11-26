@@ -27,13 +27,25 @@ cmake -S "$SRC/llvm" -B "$WORK/host" "${COMMON[@]}" \
 cmake --build "$WORK/host" --target llvm-tblgen
 TABLEGEN="$WORK/host/bin/llvm-tblgen"
 test -x "$TABLEGEN"
+# LLVM 15 only excludes the target tblgen from ALL in the branch that
+# builds host tools automatically. We already supplied an external native
+# tblgen, so explicitly exclude the unused iOS executable as well.
+# The checkout was verified clean above; restore this temporary patch on exit.
+TBLGEN_CMAKE="$SRC/llvm/utils/TableGen/CMakeLists.txt"
+trap 'git -C "$SRC" restore -- llvm/utils/TableGen/CMakeLists.txt' EXIT
+cat >> "$TBLGEN_CMAKE" <<'CMAKE'
+
+if(CMAKE_CROSSCOMPILING AND IS_ABSOLUTE "${LLVM_TABLEGEN}" AND NOT LLVM_BUILD_UTILS)
+  set_target_properties(llvm-tblgen PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+CMAKE
 PREFIX="$WORK/install-iphoneos-arm64"
 # LLVM 15 add_tablegen installs the target executable when BUILD_UTILS
 # is ON. iOS CMake defaults executables to bundles; this build needs only
 # static libraries and the already-built native TableGen executable.
 cmake -S "$SRC/llvm" -B "$WORK/iphoneos" "${COMMON[@]}" \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
-    -DCMAKE_MACOSX_BUNDLE=OFF \
+    -DCMAKE_MACOSX_BUNDLE=OFF -DLLVM_NO_DEAD_STRIP=ON \
     -DLLVM_BUILD_UTILS=OFF -DLLVM_INSTALL_UTILS=OFF \
     -DLLVM_INCLUDE_UTILS=OFF -DLLVM_INCLUDE_TOOLS=OFF \
     -DCMAKE_OSX_SYSROOT="$(xcrun --sdk iphoneos --show-sdk-path)" \
