@@ -28,8 +28,14 @@ cmake --build "$WORK/host" --target llvm-tblgen
 TABLEGEN="$WORK/host/bin/llvm-tblgen"
 test -x "$TABLEGEN"
 PREFIX="$WORK/install-iphoneos-arm64"
+# LLVM 15 add_tablegen installs the target executable when BUILD_UTILS
+# is ON. iOS CMake defaults executables to bundles; this build needs only
+# static libraries and the already-built native TableGen executable.
 cmake -S "$SRC/llvm" -B "$WORK/iphoneos" "${COMMON[@]}" \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_MACOSX_BUNDLE=OFF \
+    -DLLVM_BUILD_UTILS=OFF -DLLVM_INSTALL_UTILS=OFF \
+    -DLLVM_INCLUDE_UTILS=OFF -DLLVM_INCLUDE_TOOLS=OFF \
     -DCMAKE_OSX_SYSROOT="$(xcrun --sdk iphoneos --show-sdk-path)" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
     -DCMAKE_C_COMPILER="$(xcrun --sdk iphoneos --find clang)" \
